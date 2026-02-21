@@ -21,6 +21,7 @@ class EventType(str, Enum):
     PHRASES_UPDATED = "phrases_updated"
     CALIBRATION_PROGRESS = "calibration_progress"
     EEG_SAMPLE = "eeg_sample"
+    BAND_POWER = "band_power"
     SYSTEM_STATUS = "system_status"
     FLASH_COMMAND = "flash_command"
 

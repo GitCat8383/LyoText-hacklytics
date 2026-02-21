@@ -8,10 +8,21 @@ import threading
 import time
 
 import numpy as np
-from scipy.signal import butter, sosfilt
+from scipy.signal import butter, sosfilt, welch
 
 import config
 from utils.events import Event, EventType, event_bus
+
+# EEG frequency bands (Hz)
+BANDS = {
+    "delta": (0.5, 4),
+    "theta": (4, 8),
+    "alpha": (8, 13),
+    "beta":  (13, 30),
+    "gamma": (30, 45),
+}
+
+BAND_POWER_INTERVAL = 0.5  # seconds between band-power emissions
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +50,16 @@ class SignalProcessor:
         self._markers: collections.deque[tuple[float, int]] = collections.deque(maxlen=100)
         event_bus.on(EventType.STIMULUS_ONSET, self._on_stimulus)
 
+        self._last_band_power_ts = 0.0
+        threading.Thread(target=self._band_power_loop, daemon=True).start()
+
     def _on_stimulus(self, event: Event) -> None:
         ts = event.timestamp
         phrase_idx = event.data.get("phrase_index", -1)
         self._markers.append((ts, phrase_idx))
 
     def process_chunk(self, samples: np.ndarray, timestamps: np.ndarray) -> np.ndarray:
+        samples = samples[:, : config.NUM_CHANNELS]
         filtered = np.empty_like(samples)
 
         with self._lock:
@@ -131,6 +146,59 @@ class SignalProcessor:
             epoch = epoch[:, : config.EPOCH_SAMPLES]
 
         return epoch
+
+    def _band_power_loop(self) -> None:
+        """Emit band power every BAND_POWER_INTERVAL seconds."""
+        while True:
+            time.sleep(BAND_POWER_INTERVAL)
+            try:
+                self._emit_band_power()
+            except Exception:
+                logger.warning("Band power computation failed", exc_info=True)
+
+    def compute_band_power(self) -> dict:
+        """Compute band power from the ring buffer. Returns dict with bands + per_channel."""
+        with self._lock:
+            n = min(self._buf_count, len(self._buffer))
+            if n < config.EEG_SAMPLE_RATE:
+                return {"bands": {}, "per_channel": {}, "error": "not enough data yet"}
+            indices = [(self._buf_idx - n + i) % len(self._buffer) for i in range(n)]
+            data = self._buffer[indices].copy()
+
+        fs = config.EEG_SAMPLE_RATE
+        nperseg = min(256, n)
+        band_data: dict[str, float] = {}
+
+        _integrate = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+
+        for band_name, (lo, hi) in BANDS.items():
+            powers = []
+            for ch in range(config.NUM_CHANNELS):
+                f, pxx = welch(data[:, ch], fs=fs, nperseg=nperseg)
+                mask = (f >= lo) & (f <= hi)
+                if mask.any():
+                    powers.append(float(_integrate(pxx[mask], f[mask])))
+            band_data[band_name] = float(np.mean(powers)) if powers else 0.0
+
+        per_channel: dict[str, dict[str, float]] = {}
+        for ch_idx, ch_name in enumerate(config.EEG_CHANNELS):
+            f, pxx = welch(data[:, ch_idx], fs=fs, nperseg=nperseg)
+            ch_bands: dict[str, float] = {}
+            for band_name, (lo, hi) in BANDS.items():
+                mask = (f >= lo) & (f <= hi)
+                ch_bands[band_name] = float(_integrate(pxx[mask], f[mask])) if mask.any() else 0.0
+            per_channel[ch_name] = ch_bands
+
+        return {"bands": band_data, "per_channel": per_channel}
+
+    def _emit_band_power(self) -> None:
+        result = self.compute_band_power()
+        if "error" in result:
+            return
+        event_bus.emit(Event(
+            type=EventType.BAND_POWER,
+            data=result,
+        ))
 
 
 signal_processor = SignalProcessor()

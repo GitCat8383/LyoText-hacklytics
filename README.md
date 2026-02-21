@@ -57,12 +57,15 @@ cp .env.example .env
 
 ### Run
 
+**Option A — Simulated EEG (no Muse 2 needed):**
+
 ```bash
 # Terminal 1: Start Redis
 redis-server
 
-# Terminal 2: Start backend
+# Terminal 2: Start backend (simulated EEG)
 cd backend
+source .venv/bin/activate
 SIMULATE_EEG=true python main.py
 
 # Terminal 3: Start frontend

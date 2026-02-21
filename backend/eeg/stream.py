@@ -51,8 +51,22 @@ class EEGStream:
                 target=self._simulate_loop, daemon=True
             )
         else:
-            self._start_muselsl()
-            self._connect_inlet()
+            try:
+                # Check if an LSL stream is already available (e.g. muselsl
+                # running manually in a Terminal window) before spawning a
+                # subprocess of our own.
+                if not self._lsl_stream_exists():
+                    self._start_muselsl()
+                else:
+                    logger.info("Existing LSL EEG stream detected — skipping muselsl subprocess")
+                self._connect_inlet()
+            except RuntimeError as exc:
+                logger.error("EEG connection failed: %s — falling back to simulation", exc)
+                self._thread = threading.Thread(
+                    target=self._simulate_loop, daemon=True
+                )
+                self._thread.start()
+                return
             self._thread = threading.Thread(
                 target=self._read_loop, daemon=True
             )
@@ -66,6 +80,15 @@ class EEGStream:
         if self._muse_proc:
             self._muse_proc.terminate()
             self._muse_proc = None
+
+    def _lsl_stream_exists(self) -> bool:
+        """Return True if an EEG LSL stream is already broadcasting."""
+        try:
+            import pylsl
+            streams = pylsl.resolve_byprop("type", "EEG", timeout=2)
+            return len(streams) > 0
+        except Exception:
+            return False
 
     def _start_muselsl(self) -> None:
         logger.info("Launching muselsl stream subprocess...")
@@ -165,6 +188,7 @@ class EEGStream:
             )
 
     def _distribute(self, samples: np.ndarray, timestamps: np.ndarray) -> None:
+        samples = samples[:, :4]
         try:
             redis_store.push_raw(samples, timestamps)
         except Exception:
