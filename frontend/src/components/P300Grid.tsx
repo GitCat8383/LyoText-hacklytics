@@ -28,6 +28,8 @@ import {
 } from 'lucide-react';
 import EEGMonitor from './EEGMonitor';
 import BandPowerHistogram from './BandPowerHistogram';
+import DeepLearningPanel from './DeepLearningPanel';
+import LiveTestPanel from './LiveTestPanel';
 
 const FALLBACK_PHRASES = ["Yes", "No", "Help me please", "Thank you", "I need water", "I'm okay"];
 
@@ -267,7 +269,13 @@ const P300Grid: React.FC = () => {
             <span className="text-[10px] font-bold bg-amber-200 text-amber-800 px-2 py-0.5 rounded-full">SIM</span>
           )}
           {status?.classifier_loaded && (
-            <span className="text-[10px] font-bold bg-emerald-200 text-emerald-800 px-2 py-0.5 rounded-full">MODEL OK</span>
+            <span className="text-[10px] font-bold bg-emerald-200 text-emerald-800 px-2 py-0.5 rounded-full">LDA</span>
+          )}
+          {status?.eegnet_p300 && (
+            <span className="text-[10px] font-bold bg-green-200 text-green-800 px-2 py-0.5 rounded-full">P300-DL</span>
+          )}
+          {status?.eegnet_gesture && (
+            <span className="text-[10px] font-bold bg-blue-200 text-blue-800 px-2 py-0.5 rounded-full">GESTURE-DL</span>
           )}
         </div>
         <div className="flex items-center gap-2">
@@ -333,6 +341,12 @@ const P300Grid: React.FC = () => {
           <BandPowerHistogram />
         </div>
       </div>
+
+      {/* Live Gesture Test */}
+      <LiveTestPanel />
+
+      {/* Deep Learning Panel */}
+      <DeepLearningPanel />
 
       {/* Control Panel */}
       <div className="bg-white/40 backdrop-blur-md p-4 rounded-3xl border border-white/50 shadow-sm space-y-3">

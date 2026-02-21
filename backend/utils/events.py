@@ -24,6 +24,7 @@ class EventType(str, Enum):
     BAND_POWER = "band_power"
     SYSTEM_STATUS = "system_status"
     FLASH_COMMAND = "flash_command"
+    GESTURE_PREDICTION = "gesture_prediction"
 
 
 @dataclass
