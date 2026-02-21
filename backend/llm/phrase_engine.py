@@ -49,10 +49,14 @@ class PhraseEngine:
         if cache_key == self._cache_key and self._cached_phrases:
             return self._cached_phrases
 
+        if not config.GEMINI_API_KEY or config.GEMINI_API_KEY == "your-gemini-api-key-here":
+            logger.debug("No Gemini API key configured — using fallback phrases")
+            return self._fallback_phrases(n)
+
         try:
             phrases = await self._call_gemini(n)
         except Exception:
-            logger.exception("Gemini API call failed, using fallback phrases")
+            logger.warning("Gemini API call failed, using fallback phrases")
             phrases = self._fallback_phrases(n)
 
         self._cached_phrases = phrases[:n]

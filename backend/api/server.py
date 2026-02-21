@@ -6,7 +6,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes import router
@@ -50,7 +50,7 @@ def create_app() -> FastAPI:
     app.include_router(router)
 
     @app.websocket("/ws/events")
-    async def websocket_endpoint(websocket):
+    async def websocket_endpoint(websocket: WebSocket):
         await ws_manager.handle(websocket)
 
     return app

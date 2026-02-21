@@ -27,6 +27,7 @@ import {
   Settings,
 } from 'lucide-react';
 import EEGMonitor from './EEGMonitor';
+import BandPowerHistogram from './BandPowerHistogram';
 
 const FALLBACK_PHRASES = ["Yes", "No", "Help me please", "Thank you", "I need water", "I'm okay"];
 
@@ -323,6 +324,13 @@ const P300Grid: React.FC = () => {
       <div className="bg-white/40 backdrop-blur-md p-2 rounded-2xl border border-white/50 shadow-sm">
         <div className="bg-white/60 rounded-xl p-1">
           <EEGMonitor isFlashing={isFlashing} />
+        </div>
+      </div>
+
+      {/* Band Power Histogram */}
+      <div className="bg-white/40 backdrop-blur-md p-2 rounded-2xl border border-white/50 shadow-sm">
+        <div className="bg-white/60 rounded-xl p-1">
+          <BandPowerHistogram />
         </div>
       </div>
 

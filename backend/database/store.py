@@ -73,6 +73,48 @@ class RedisStore:
             for _id, data in entries
         ]
 
+    def get_raw_at_second(self, offset_sec: float) -> dict[str, Any]:
+        """Read ~1 second of EEG data centered at `offset_sec` seconds ago.
+
+        Args:
+            offset_sec: How many seconds ago to read from (e.g. 10 = 10 seconds ago).
+
+        Returns:
+            Dict with metadata and list of samples within that 1-second window.
+        """
+        now = time.time()
+        window_start = now - offset_sec
+        window_end = window_start + 1.0
+
+        start_ms = int(window_start * 1000)
+        end_ms = int(window_end * 1000)
+
+        entries = self.client.xrange(
+            config.REDIS_RAW_STREAM,
+            min=f"{start_ms}-0",
+            max=f"{end_ms}-0",
+        )
+
+        samples = [
+            {
+                "ts": float(data["ts"]),
+                "tp9": float(data["tp9"]),
+                "af7": float(data["af7"]),
+                "af8": float(data["af8"]),
+                "tp10": float(data["tp10"]),
+            }
+            for _id, data in entries
+        ]
+
+        return {
+            "offset_sec": offset_sec,
+            "window_start": window_start,
+            "window_end": window_end,
+            "sample_count": len(samples),
+            "expected_samples": config.EEG_SAMPLE_RATE,
+            "samples": samples,
+        }
+
     # ── Epochs ────────────────────────────────────────────────
 
     def push_epoch(

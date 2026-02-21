@@ -10,6 +10,7 @@ from pydantic import BaseModel
 import config
 from database.store import redis_store
 from eeg.classifier import p300_classifier
+from eeg.processing import signal_processor
 from llm.phrase_engine import phrase_engine
 from utils.events import Event, EventType, event_bus
 
@@ -151,3 +152,26 @@ async def update_config(update: ConfigUpdate) -> dict[str, str]:
 async def get_events(seconds: float = 60.0) -> dict[str, Any]:
     events = redis_store.get_recent_events(seconds)
     return {"events": events}
+
+
+@router.get("/eeg/band_power")
+async def get_band_power() -> dict[str, Any]:
+    result = signal_processor.compute_band_power()
+    return result
+
+
+@router.get("/eeg/raw/{offset_sec}")
+async def get_raw_at_second(offset_sec: float) -> dict[str, Any]:
+    """Read ~1 second of raw EEG data from `offset_sec` seconds ago.
+
+    Example: GET /api/eeg/raw/10 → returns ~256 samples from 10 seconds ago.
+    """
+    if offset_sec < 0:
+        raise HTTPException(status_code=400, detail="offset_sec must be >= 0")
+    max_seconds = config.REDIS_RAW_MAXLEN / config.EEG_SAMPLE_RATE
+    if offset_sec > max_seconds:
+        raise HTTPException(
+            status_code=400,
+            detail=f"offset_sec too large. Redis keeps ~{max_seconds:.0f}s of data.",
+        )
+    return redis_store.get_raw_at_second(offset_sec)

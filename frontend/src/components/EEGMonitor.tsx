@@ -24,12 +24,18 @@ const EEGMonitor: React.FC<EEGMonitorProps> = ({ isFlashing }) => {
   const timeRef = useRef(0);
   const wsSubscribedRef = useRef(false);
 
-  // Subscribe to EEG stream via WebSocket
+  // Subscribe to EEG stream via WebSocket — re-subscribe on every reconnect
   useEffect(() => {
-    if (!wsSubscribedRef.current) {
+    const sendSub = () => {
       bciSocket.subscribeEEG();
       wsSubscribedRef.current = true;
+    };
+
+    // Subscribe immediately if already connected, otherwise wait for open
+    if (bciSocket.connected) {
+      sendSub();
     }
+    const unsubConnected = bciSocket.on('ws_connected', sendSub);
 
     const unsubEEG = bciSocket.on('eeg_sample', (e: BCIEvent) => {
       const sample = e.data;
@@ -56,6 +62,7 @@ const EEGMonitor: React.FC<EEGMonitorProps> = ({ isFlashing }) => {
     });
 
     return () => {
+      unsubConnected();
       unsubEEG();
       unsubBlink();
       unsubClench();
