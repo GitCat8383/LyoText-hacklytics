@@ -17,6 +17,10 @@ env/
 # Model artifacts (large binary files)
 backend/models/*.joblib
 
+# Training data (large)
+backend/kaggle_data/
+backend/data/
+
 # Node / React
 node_modules/
 .next/
