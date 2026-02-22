@@ -125,16 +125,19 @@ def create_p300_model(n_samples: int = 230) -> EEGNet:
     return EEGNet(n_channels=4, n_samples=n_samples, n_classes=2)
 
 
-def create_gesture_model(n_samples: int = 256) -> EEGNet:
-    """EEGNet for gesture classification (idle / blink / clench / noise)."""
+def create_gesture_model(n_samples: int = 256, n_channels: int = 24) -> EEGNet:
+    """EEGNet for gesture classification (idle / blink / clench / noise).
+
+    Default n_channels=24: 4 raw EEG + 20 spectral band-power channels.
+    """
     return EEGNet(
-        n_channels=4,
+        n_channels=n_channels,
         n_samples=n_samples,
         n_classes=4,
-        F1=8,
+        F1=16,
         D=2,
-        F2=16,
-        kern_length=32,
+        F2=32,
+        kern_length=64,
     )
 
 

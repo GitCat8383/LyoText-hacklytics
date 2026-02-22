@@ -42,6 +42,9 @@ class TrainResult:
     total_time_sec: float
     model_path: str
     class_accuracies: dict[str, float]
+    confusion_matrix: np.ndarray | None = None
+    classification_report: str = ""
+    class_names: list[str] | None = None
 
 
 class DeepTrainer:
@@ -114,9 +117,12 @@ class DeepTrainer:
         if gesture_path.exists():
             try:
                 state = torch.load(gesture_path, map_location=self._device, weights_only=True)
-                # Detect actual n_classes from the saved classifier weights
                 n_classes = state["model_state"]["classifier.weight"].shape[0]
-                self._gesture_model = create_gesture_model(n_samples=state["n_samples"])
+                n_channels = state.get("n_channels", 4)
+                n_samples = state["n_samples"]
+                self._gesture_model = create_gesture_model(
+                    n_samples=n_samples, n_channels=n_channels,
+                )
                 if n_classes != self._gesture_model.n_classes:
                     self._gesture_model.classifier = nn.Linear(
                         self._gesture_model._flat_size, n_classes
@@ -125,14 +131,19 @@ class DeepTrainer:
                 self._gesture_model.load_state_dict(state["model_state"])
                 self._gesture_model.to(self._device).eval()
 
+                self._gesture_label_map = state.get("label_map", {})
+                self._gesture_preprocess = state.get("preprocessing", {})
+
                 self._gesture_input = torch.zeros(
-                    1, 1, 4, state["n_samples"],
+                    1, 1, n_channels, n_samples,
                     dtype=torch.float32, device=self._device,
                 )
                 self._trace_and_warmup("gesture", self._gesture_model, self._gesture_input)
                 results["gesture"] = True
-                logger.info("Loaded gesture EEGNet (%d params, traced + warmed up)",
-                            self._gesture_model.count_parameters())
+                logger.info(
+                    "Loaded gesture EEGNet (%d params, %d channels, labels=%s, traced + warmed up)",
+                    self._gesture_model.count_parameters(), n_channels, self._gesture_label_map,
+                )
             except Exception:
                 logger.exception("Failed to load gesture model")
                 results["gesture"] = False
@@ -198,15 +209,21 @@ class DeepTrainer:
         lr: float = 1e-3,
         patience: int = 15,
     ) -> TrainResult:
-        """Train gesture model (idle=0, blink=2, clench=3, noise=4 → remapped to 0-3)."""
-        # Remap labels to contiguous 0..3
+        """Train gesture model.
+
+        Input epochs_data can be raw (n, 4, samples) — preprocessing happens in
+        EEGDataset — or already preprocessed (n, 24, samples).
+        """
         unique_labels = sorted(set(labels.tolist()))
         label_remap = {old: new for new, old in enumerate(unique_labels)}
         remapped = np.array([label_remap[l] for l in labels])
         class_names = [LABEL_NAMES[l] if l < len(LABEL_NAMES) else str(l) for l in unique_labels]
 
+        n_channels = epochs_data.shape[1]
         n_samples = epochs_data.shape[2]
-        model = create_gesture_model(n_samples=n_samples)
+        # EEGDataset will expand 4-ch → 24-ch via preprocess_epoch; for pre-expanded data it stays as-is
+        model_channels = 24 if n_channels <= 4 else n_channels
+        model = create_gesture_model(n_samples=n_samples, n_channels=model_channels)
         model.classifier = nn.Linear(model._flat_size, len(unique_labels))
         model.n_classes = len(unique_labels)
 
@@ -245,13 +262,13 @@ class DeepTrainer:
             model_name, len(labels), len(class_names), model.count_parameters(),
         )
 
-        # Class-weighted loss for imbalanced data
         class_counts = np.bincount(labels, minlength=len(class_names)).astype(np.float32)
         class_counts = np.maximum(class_counts, 1.0)
         weights = 1.0 / class_counts
         weights = weights / weights.sum() * len(class_names)
         criterion = nn.CrossEntropyLoss(
-            weight=torch.tensor(weights, dtype=torch.float32).to(self._device)
+            weight=torch.tensor(weights, dtype=torch.float32).to(self._device),
+            label_smoothing=0.1,
         )
 
         optimizer = Adam(model.parameters(), lr=lr, weight_decay=1e-4)
@@ -339,22 +356,41 @@ class DeepTrainer:
                     logger.info("[%s] Early stopping at epoch %d", model_name, epoch + 1)
                     break
 
-        # Restore best model
+        # Restore best model and re-evaluate on val set for final metrics
         if best_state:
             model.load_state_dict(best_state)
         model.to(self._device).eval()
 
-        # Per-class accuracy
-        all_preds_np = np.array(all_preds)
-        all_true_np = np.array(all_true)
+        final_preds, final_true = [], []
+        with torch.no_grad():
+            for X, y in val_loader:
+                X, y = X.to(self._device), y.to(self._device)
+                logits = model(X)
+                preds = logits.argmax(1)
+                final_preds.extend(preds.cpu().numpy())
+                final_true.extend(y.cpu().numpy())
+
+        final_preds_np = np.array(final_preds)
+        final_true_np = np.array(final_true)
+
         class_accs = {}
         for i, name in enumerate(class_names):
-            mask = all_true_np == i
+            mask = final_true_np == i
             if mask.sum() > 0:
-                class_accs[name] = float((all_preds_np[mask] == i).mean())
+                class_accs[name] = float((final_preds_np[mask] == i).mean())
 
-        # Save model
-        save_path = self._save_model(model, model_name, epochs_data.shape[2])
+        # Confusion matrix + classification report
+        from sklearn.metrics import confusion_matrix, classification_report
+        cm = confusion_matrix(final_true_np, final_preds_np, labels=list(range(len(class_names))))
+        report = classification_report(
+            final_true_np, final_preds_np,
+            target_names=class_names,
+            digits=3,
+            zero_division=0,
+        )
+
+        # Save model with label map and preprocessing params
+        save_path = self._save_model(model, model_name, epochs_data.shape[2], class_names)
         total_time = time.time() - start_time
 
         self._training = False
@@ -367,6 +403,9 @@ class DeepTrainer:
             total_time_sec=total_time,
             model_path=str(save_path),
             class_accuracies=class_accs,
+            confusion_matrix=cm,
+            classification_report=report,
+            class_names=class_names,
         )
         logger.info(
             "[%s] Training complete: val_acc=%.1f%% in %.1fs (%d epochs)",
@@ -374,19 +413,37 @@ class DeepTrainer:
         )
         return result
 
-    def _save_model(self, model: EEGNet, name: str, n_samples: int) -> Path:
+    def _save_model(
+        self, model: EEGNet, name: str, n_samples: int,
+        class_names: list[str] | None = None,
+    ) -> Path:
         MODELS_DIR.mkdir(parents=True, exist_ok=True)
         path = MODELS_DIR / f"eegnet_{name}.pt"
-        torch.save({
+        save_dict = {
             "model_state": model.state_dict(),
             "n_channels": model.n_channels,
             "n_samples": n_samples,
             "n_classes": model.n_classes,
-        }, path)
-        logger.info("Saved %s model to %s", name, path)
+            "label_map": {i: n for i, n in enumerate(class_names)} if class_names else {},
+            "preprocessing": {
+                "bandpass_low": 1.0,
+                "bandpass_high": 100.0,
+                "sample_rate": 256,
+                "common_avg_ref": True,
+                "z_score_normalize": True,
+                "band_powers": True,
+                "n_bands": 5,
+                "bands": [(1, 4), (4, 8), (8, 13), (13, 30), (30, 100)],
+            },
+        }
+        torch.save(save_dict, path)
+        logger.info("Saved %s model to %s (n_channels=%d, classes=%s)",
+                     name, path, model.n_channels, class_names)
 
-        # Pre-allocate input tensor and trace for instant inference
-        dummy = torch.zeros(1, 1, 4, n_samples, dtype=torch.float32, device=self._device)
+        dummy = torch.zeros(
+            1, 1, model.n_channels, n_samples,
+            dtype=torch.float32, device=self._device,
+        )
         if name == "p300":
             self._p300_input = dummy
         else:
@@ -423,17 +480,22 @@ class DeepTrainer:
     def predict_gesture(self, window: np.ndarray) -> tuple[int, str, float]:
         """Classify a gesture from a raw EEG window.
 
-        Uses pre-allocated tensor + TorchScript traced model for minimum latency.
-        Applies per-channel z-score normalization to match training distribution.
+        Applies full preprocessing pipeline (bandpass, CAR, z-score, band powers)
+        then runs the traced model for minimum latency.
         """
         if self._gesture_model is None or self._gesture_input is None:
             raise RuntimeError("Gesture model not loaded")
 
-        from eeg.dataset import normalize_epoch
-        normalized = normalize_epoch(window.astype(np.float32))
+        from eeg.dataset import preprocess_epoch
+        preprocessed = preprocess_epoch(window.astype(np.float32))
+
+        n_ch = self._gesture_input.shape[2]
+        if preprocessed.shape[0] != n_ch:
+            from eeg.dataset import normalize_epoch
+            preprocessed = normalize_epoch(window.astype(np.float32))
 
         self._gesture_input[0, 0].copy_(
-            torch.from_numpy(normalized)
+            torch.from_numpy(preprocessed)
         )
 
         model = self._gesture_traced or self._gesture_model
@@ -443,8 +505,12 @@ class DeepTrainer:
             pred = probs[0].argmax().item()
             confidence = probs[0, pred].item()
 
-        gesture_names = ["idle", "blink", "clench", "noise"]
-        name = gesture_names[pred] if pred < len(gesture_names) else f"class_{pred}"
+        label_map = getattr(self, "_gesture_label_map", {})
+        if label_map:
+            name = label_map.get(pred, label_map.get(str(pred), f"class_{pred}"))
+        else:
+            gesture_names = ["idle", "blink", "clench", "noise"]
+            name = gesture_names[pred] if pred < len(gesture_names) else f"class_{pred}"
         return pred, name, confidence
 
     def select_phrase_deep(

@@ -1,4 +1,4 @@
-"""EEG dataset utilities: loading, saving, augmentation, and torch DataLoaders."""
+"""EEG dataset utilities: preprocessing, augmentation, and torch DataLoaders."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
+from scipy.signal import butter, filtfilt, welch
 
 import config
 
@@ -22,7 +23,6 @@ LABEL_MAP = {
     "blink": 2,
     "clench": 3,
     "noise": 4,
-    # Binary P300 aliases
     "non_target": 0,
     "target": 1,
 }
@@ -31,6 +31,51 @@ LABEL_NAMES = ["idle", "p300_target", "blink", "clench", "noise"]
 
 DATA_DIR = Path(config.BASE_DIR) / "data"
 
+EEG_BANDS = [(1, 4), (4, 8), (8, 13), (13, 30), (30, 100)]
+
+
+# ── Signal preprocessing ─────────────────────────────────────
+
+_BP_CACHE: dict[tuple, tuple] = {}
+
+
+def bandpass_filter(
+    data: np.ndarray, low: float = 1.0, high: float = 100.0,
+    fs: int = 256, order: int = 4,
+) -> np.ndarray:
+    """Zero-phase Butterworth bandpass filter.
+
+    Args:
+        data: (n_channels, n_samples) or (n_samples,) for a full trial
+    """
+    cache_key = (low, high, fs, order)
+    if cache_key not in _BP_CACHE:
+        _BP_CACHE[cache_key] = butter(order, [low / (fs / 2), high / (fs / 2)], btype="band")
+    b, a = _BP_CACHE[cache_key]
+    padlen = 3 * max(len(b), len(a))
+    if data.shape[-1] <= padlen:
+        return data.astype(np.float32)
+    return filtfilt(b, a, data, axis=-1).astype(np.float32)
+
+
+def common_avg_reference(epoch: np.ndarray) -> np.ndarray:
+    """Subtract mean across channels at each time point. (n_channels, n_samples)"""
+    return (epoch - epoch.mean(axis=0, keepdims=True)).astype(np.float32)
+
+
+def reject_artifact(epoch: np.ndarray, max_pp_uv: float = 800.0) -> bool:
+    """Return True if epoch is clean enough (no electrode pops or saturation).
+
+    Threshold is high (800μV) because blinks (~200μV) and clenches (~300μV+)
+    are the signals we want to keep. Only reject true hardware artifacts.
+    """
+    pp = epoch.max(axis=1) - epoch.min(axis=1)
+    if float(pp.max()) > max_pp_uv:
+        return False
+    if float(pp.min()) < 1.0:
+        return False
+    return True
+
 
 def normalize_epoch(epoch: np.ndarray) -> np.ndarray:
     """Per-channel z-score normalization for a single epoch.
@@ -38,17 +83,55 @@ def normalize_epoch(epoch: np.ndarray) -> np.ndarray:
     Args:
         epoch: shape (n_channels, n_samples)
     Returns:
-        Normalized epoch with each channel having mean≈0, std≈1.
-        Channels with zero variance are left as zeros.
+        Normalized epoch with each channel having mean~0, std~1.
     """
     mean = epoch.mean(axis=1, keepdims=True)
     std = epoch.std(axis=1, keepdims=True)
     std[std < 1e-8] = 1.0
-    return (epoch - mean) / std
+    return ((epoch - mean) / std).astype(np.float32)
 
+
+def compute_band_powers(epoch: np.ndarray, fs: int = 256) -> np.ndarray:
+    """Compute log band power for 5 standard EEG bands, per channel.
+
+    Args:
+        epoch: (n_eeg_channels, n_samples) — should be bandpass-filtered first
+    Returns:
+        (n_eeg_channels * 5, n_samples) — each band power broadcast across time
+    """
+    n_samples = epoch.shape[1]
+    nperseg = min(128, n_samples)
+    features = []
+    for ch in epoch:
+        freqs, psd = welch(ch, fs=fs, nperseg=nperseg)
+        for low, high in EEG_BANDS:
+            mask = (freqs >= low) & (freqs <= high)
+            bp = np.log1p(psd[mask].mean()) if mask.any() else 0.0
+            features.append(np.full(n_samples, bp, dtype=np.float32))
+    return np.array(features, dtype=np.float32)
+
+
+def preprocess_epoch(epoch: np.ndarray, fs: int = 256) -> np.ndarray:
+    """Full preprocessing pipeline for a single epoch.
+
+    Applies bandpass -> CAR -> z-score normalize -> band powers -> concatenate.
+
+    Args:
+        epoch: raw (4, n_samples)
+    Returns:
+        (24, n_samples) — 4 preprocessed EEG + 20 band power channels
+    """
+    filtered = bandpass_filter(epoch, low=1.0, high=100.0, fs=fs)
+    car = common_avg_reference(filtered)
+    normalized = normalize_epoch(car)
+    band_feats = compute_band_powers(car, fs=fs)
+    return np.concatenate([normalized, band_feats], axis=0).astype(np.float32)
+
+
+# ── Dataset ───────────────────────────────────────────────────
 
 class EEGDataset(Dataset):
-    """In-memory EEG epoch dataset with optional augmentation."""
+    """In-memory EEG epoch dataset with preprocessing and augmentation."""
 
     def __init__(
         self,
@@ -58,13 +141,14 @@ class EEGDataset(Dataset):
     ) -> None:
         """
         Args:
-            epochs: shape (n_epochs, n_channels, n_samples)
+            epochs: shape (n_epochs, n_channels, n_samples) — raw 4-ch or preprocessed 24-ch
             labels: shape (n_epochs,) integer class labels
             augment: apply real-time data augmentation
         """
         self.epochs = epochs.astype(np.float32)
         self.labels = labels.astype(np.int64)
         self.augment = augment
+        self._is_preprocessed = epochs.shape[1] > 4 if epochs.ndim == 3 else False
 
     def __len__(self) -> int:
         return len(self.labels)
@@ -75,34 +159,42 @@ class EEGDataset(Dataset):
         if self.augment:
             epoch = self._augment(epoch)
 
-        epoch = normalize_epoch(epoch)
+        if not self._is_preprocessed:
+            epoch = preprocess_epoch(epoch)
+        else:
+            eeg_ch = epoch[:4]
+            band_ch = epoch[4:]
+            eeg_ch = normalize_epoch(eeg_ch)
+            epoch = np.concatenate([eeg_ch, band_ch], axis=0)
 
-        # Shape: (1, n_channels, n_samples) — add the "image channel" dim
         x = torch.tensor(epoch, dtype=torch.float32).unsqueeze(0)
         y = torch.tensor(self.labels[idx], dtype=torch.long)
         return x, y
 
     def _augment(self, epoch: np.ndarray) -> np.ndarray:
         rng = np.random.default_rng()
+        n_samples = epoch.shape[1]
 
-        # Gaussian noise injection (σ = 5–15% of signal std)
-        if rng.random() < 0.5:
-            noise_scale = rng.uniform(0.05, 0.15) * epoch.std()
-            epoch = epoch + rng.normal(0, noise_scale, epoch.shape)
-
-        # Amplitude scaling (0.8×–1.2×)
         if rng.random() < 0.5:
             scale = rng.uniform(0.8, 1.2)
             epoch = epoch * scale
 
-        # Temporal shift (±10 samples)
-        if rng.random() < 0.3:
-            shift = rng.integers(-10, 11)
-            epoch = np.roll(epoch, shift, axis=1)
+        if rng.random() < 0.5:
+            noise_scale = rng.uniform(0.05, 0.15) * epoch.std()
+            epoch = epoch + rng.normal(0, noise_scale, epoch.shape).astype(np.float32)
 
-        # Channel dropout (zero one random channel)
+        if rng.random() < 0.3:
+            shift = int(rng.integers(-10, 11))
+            if shift != 0:
+                shifted = np.zeros_like(epoch)
+                if shift > 0:
+                    shifted[:, shift:] = epoch[:, :n_samples - shift]
+                else:
+                    shifted[:, :n_samples + shift] = epoch[:, -shift:]
+                epoch = shifted
+
         if rng.random() < 0.2:
-            ch = rng.integers(0, epoch.shape[0])
+            ch = int(rng.integers(0, min(4, epoch.shape[0])))
             epoch[ch, :] = 0.0
 
         return epoch

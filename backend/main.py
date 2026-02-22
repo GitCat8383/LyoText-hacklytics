@@ -133,9 +133,9 @@ class BCIOrchestrator:
         self._live_test_active = value
         self._gesture_vote_buffer.clear()
         if value:
-            print("\n" + "=" * 50)
-            print("  🧠  LIVE GESTURE TEST — 1.0s interval, majority vote")
-            print("=" * 50)
+            print("\n" + "=" * 58)
+            print("  🧠  LIVE GESTURE TEST — 0.25s interval, 9-window majority vote")
+            print("=" * 58)
             print("  ICON  CLASS    │    CONFIDENCE BAR   │  CONF%  │ VOTE")
             print("  " + "─" * 54)
         else:
@@ -162,7 +162,7 @@ class BCIOrchestrator:
                     self._cycle_epochs.append((epoch, phrase_idx))
 
             now = time.time()
-            interval = 1.0
+            interval = 0.25
 
             if (
                 deep_trainer.gesture_model is not None
@@ -343,8 +343,8 @@ class BCIOrchestrator:
             data = _np2.pad(data, ((pad, 0), (0, 0)), mode="edge")
         return data.T
 
-    _CONFIDENCE_THRESHOLD = 0.75
-    _VOTE_WINDOW = 3
+    _CONFIDENCE_THRESHOLD = 0.70
+    _VOTE_WINDOW = 9
 
     def _majority_vote(self) -> tuple[str, float]:
         """Return the majority class and its average confidence from the vote buffer."""
