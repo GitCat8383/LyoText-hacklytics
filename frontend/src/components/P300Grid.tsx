@@ -8,13 +8,10 @@ import {
   getHistory,
   confirmPhrase,
   deleteLastPhrase,
-  clearAllHistory,
-  checkSentence,
   startCalibration,
   stopCalibration,
   type BCIEvent,
   type SystemStatus,
-  type SentenceCheck,
 } from '../services/api';
 import {
   Volume2,
@@ -22,24 +19,22 @@ import {
   Play,
   StopCircle,
   RefreshCw,
+  Trash2,
   Wifi,
   WifiOff,
   Eye,
   Zap,
-  Undo2,
-  Eraser,
-  CheckCircle2,
-  Timer,
+  Settings,
 } from 'lucide-react';
 import EEGMonitor from './EEGMonitor';
 import BandPowerHistogram from './BandPowerHistogram';
 import DeepLearningPanel from './DeepLearningPanel';
 import LiveTestPanel from './LiveTestPanel';
 
-const FALLBACK_WORDS = ['I', 'Yes', 'No', 'Help', 'Please', 'Thank'];
+const FALLBACK_PHRASES = ["Yes", "No", "Help me please", "Thank you", "I need water", "I'm okay"];
 
 const P300Grid: React.FC = () => {
-  const [words, setWords] = useState<string[]>(FALLBACK_WORDS);
+  const [phrases, setPhrases] = useState<string[]>(FALLBACK_PHRASES);
   const [sentence, setSentence] = useState<string[]>([]);
   const [isSessionActive, setIsSessionActive] = useState(false);
   const [isFlashing, setIsFlashing] = useState(false);
@@ -52,22 +47,16 @@ const P300Grid: React.FC = () => {
   const [isDemoMode, setIsDemoMode] = useState(false);
   const [confidence, setConfidence] = useState<number | null>(null);
 
+  // Blink / clench visual feedback
   const [blinkFlash, setBlinkFlash] = useState(false);
   const [clenchFlash, setClenchFlash] = useState(false);
-  const [sentenceStatus, setSentenceStatus] = useState<SentenceCheck | null>(null);
-  const [silenceCountdown, setSilenceCountdown] = useState<number | null>(null);
-  const [isSpeaking, setIsSpeaking] = useState(false);
 
   const sentenceRef = useRef(sentence);
   useEffect(() => { sentenceRef.current = sentence; }, [sentence]);
-  const selectedIndexRef = useRef(selectedIndex);
-  useEffect(() => { selectedIndexRef.current = selectedIndex; }, [selectedIndex]);
-  const wordsRef = useRef(words);
-  useEffect(() => { wordsRef.current = words; }, [words]);
-  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isDemoModeRef = useRef(isDemoMode);
+  useEffect(() => { isDemoModeRef.current = isDemoMode; }, [isDemoMode]);
 
-  // ── Fetch initial state ────────────────────────────────────
+  // ── Connect to backend on mount ────────────────────────────
 
   useEffect(() => {
     bciSocket.connect();
@@ -80,7 +69,7 @@ const P300Grid: React.FC = () => {
           getHistory(),
         ]);
         setStatus(st);
-        setWords(ph.length > 0 ? ph : FALLBACK_WORDS);
+        setPhrases(ph.length > 0 ? ph : FALLBACK_PHRASES);
         setSentence(hist);
       } catch {
         console.warn('Backend not reachable, using fallback mode');
@@ -91,7 +80,7 @@ const P300Grid: React.FC = () => {
     return () => bciSocket.disconnect();
   }, []);
 
-  // ── WebSocket events ───────────────────────────────────────
+  // ── WebSocket event handlers ───────────────────────────────
 
   useEffect(() => {
     const unsubs: (() => void)[] = [];
@@ -101,9 +90,9 @@ const P300Grid: React.FC = () => {
       bciSocket.on('ws_disconnected', () => setWsConnected(false)),
 
       bciSocket.on('phrases_updated', (e: BCIEvent) => {
-        const newWords = e.data.phrases;
-        if (Array.isArray(newWords) && newWords.length > 0) {
-          setWords(newWords);
+        const newPhrases = e.data.phrases;
+        if (Array.isArray(newPhrases) && newPhrases.length > 0) {
+          setPhrases(newPhrases);
         }
       }),
 
@@ -117,44 +106,29 @@ const P300Grid: React.FC = () => {
         setLastEvent(`P300 → "${e.data.phrase}" (${(conf * 100).toFixed(0)}%)`);
       }),
 
-      // BLINK = confirm/select the P300-detected word
       bciSocket.on('blink_detected', () => {
         setBlinkFlash(true);
         setTimeout(() => setBlinkFlash(false), 500);
-
-        const idx = selectedIndexRef.current;
-        if (idx !== null) {
-          handleWordConfirm(idx);
-          setLastEvent('Blink → word selected');
-        } else {
-          setLastEvent('Blink detected (no word highlighted)');
-        }
+        setLastEvent('Blink detected');
       }),
 
-      // CLENCH = undo last word
       bciSocket.on('clench_detected', () => {
         setClenchFlash(true);
         setTimeout(() => setClenchFlash(false), 500);
-
-        if (sentenceRef.current.length > 0) {
-          handleUndo();
-          setLastEvent('Clench → undo last word');
-        } else {
-          setLastEvent('Clench detected (nothing to undo)');
-        }
+        setLastEvent('Jaw clench detected');
       }),
 
       bciSocket.on('phrase_confirmed', (e: BCIEvent) => {
         setSentence(e.data.history || []);
         setSelectedIndex(null);
         setConfidence(null);
-        setLastEvent(`Added: "${e.data.phrase}"`);
+        setLastEvent(`Confirmed: "${e.data.phrase}"`);
       }),
 
       bciSocket.on('phrase_deleted', (e: BCIEvent) => {
         setSentence(e.data.history || []);
         setSelectedIndex(null);
-        setLastEvent(`Removed: "${e.data.removed}"`);
+        setLastEvent(`Deleted: "${e.data.removed}"`);
       }),
 
       bciSocket.on('calibration_progress', (e: BCIEvent) => {
@@ -169,14 +143,14 @@ const P300Grid: React.FC = () => {
     return () => unsubs.forEach((u) => u());
   }, []);
 
-  // ── Simulated flashing ─────────────────────────────────────
+  // ── Simulated flashing (demo mode visual only) ─────────────
 
   useEffect(() => {
     let interval: ReturnType<typeof setInterval>;
 
     if (isFlashing) {
       interval = setInterval(() => {
-        const idx = Math.floor(Math.random() * words.length);
+        const idx = Math.floor(Math.random() * phrases.length);
         setFlashIndex(idx);
         setTimeout(() => setFlashIndex(null), 100);
       }, 175);
@@ -184,188 +158,45 @@ const P300Grid: React.FC = () => {
       setFlashIndex(null);
     }
     return () => clearInterval(interval);
-  }, [isFlashing, words.length]);
+  }, [isFlashing, phrases.length]);
 
-  // Demo mode: auto-pick a word after a few seconds of flashing
+  // Demo mode auto-selection
   useEffect(() => {
     if (!isDemoMode || !isFlashing) return;
     const timeout = setTimeout(() => {
-      const idx = Math.floor(Math.random() * words.length);
+      const idx = Math.floor(Math.random() * phrases.length);
       setSelectedIndex(idx);
       setConfidence(0.7 + Math.random() * 0.25);
       setIsFlashing(false);
-      setLastEvent(`P300 → "${words[idx]}" (demo)`);
+      setLastEvent(`P300 → "${phrases[idx]}" (demo)`);
     }, 3000 + Math.random() * 2000);
     return () => clearTimeout(timeout);
-  }, [isDemoMode, isFlashing, words]);
-
-  // ── Silence timer: auto-end sentence after 10s ──────────────
-
-  const SILENCE_TIMEOUT = 10;
-
-  const resetSilenceTimer = useCallback(() => {
-    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-    if (countdownRef.current) clearInterval(countdownRef.current);
-    setSilenceCountdown(null);
-  }, []);
-
-  const startSilenceTimer = useCallback(() => {
-    resetSilenceTimer();
-
-    if (sentenceRef.current.length === 0) return;
-
-    setSilenceCountdown(SILENCE_TIMEOUT);
-    const startedAt = Date.now();
-
-    countdownRef.current = setInterval(() => {
-      const elapsed = Math.floor((Date.now() - startedAt) / 1000);
-      const remaining = SILENCE_TIMEOUT - elapsed;
-      if (remaining <= 0) {
-        setSilenceCountdown(0);
-      } else {
-        setSilenceCountdown(remaining);
-      }
-    }, 1000);
-
-    silenceTimerRef.current = setTimeout(() => {
-      if (countdownRef.current) clearInterval(countdownRef.current);
-      setSilenceCountdown(0);
-      autoEndSentence();
-    }, SILENCE_TIMEOUT * 1000);
-  }, [resetSilenceTimer]);
-
-  const autoEndSentence = useCallback(async () => {
-    resetSilenceTimer();
-    const text = sentenceRef.current.join(' ');
-    if (!text) return;
-
-    setIsSpeaking(true);
-    setIsFlashing(false);
-    setLastEvent(`Auto-speaking: "${text}"`);
-
-    const audioResult = await speakText(text);
-    if (audioResult && audioResult !== 'browser') {
-      const audio = new Audio(audioResult);
-      audio.onended = () => {
-        setIsSpeaking(false);
-        finishAutoEnd();
-      };
-      audio.play();
-    } else {
-      setIsSpeaking(false);
-      finishAutoEnd();
-    }
-  }, [resetSilenceTimer]);
-
-  const finishAutoEnd = useCallback(async () => {
-    setSentence([]);
-    setSelectedIndex(null);
-    setConfidence(null);
-    setSentenceStatus(null);
-    setWords(FALLBACK_WORDS);
-    setLastEvent('Sentence complete — starting fresh');
-    try {
-      await clearAllHistory();
-      const ph = await getPhrases();
-      setWords(ph.length > 0 ? ph : FALLBACK_WORDS);
-    } catch { /* keep fallback */ }
-  }, []);
-
-  useEffect(() => {
-    return () => resetSilenceTimer();
-  }, [resetSilenceTimer]);
-
-  // ── Check sentence completeness after changes ──────────────
-
-  const runSentenceCheck = useCallback(async (): Promise<SentenceCheck | null> => {
-    if (sentenceRef.current.length < 2) {
-      setSentenceStatus(null);
-      return null;
-    }
-    try {
-      const result = await checkSentence();
-      setSentenceStatus(result);
-      return result;
-    } catch {
-      setSentenceStatus(null);
-      return null;
-    }
-  }, []);
+  }, [isDemoMode, isFlashing, phrases]);
 
   // ── Actions ────────────────────────────────────────────────
 
-  const handleWordConfirm = useCallback(async (index: number) => {
-    const spokenWord = wordsRef.current[index];
+  const handlePhraseClick = useCallback(async (index: number) => {
     setIsLoading(true);
     try {
       const result = await confirmPhrase(index);
       setSentence(result.history);
-      setWords(result.new_phrases.length > 0 ? result.new_phrases : FALLBACK_WORDS);
+      setPhrases(result.new_phrases.length > 0 ? result.new_phrases : FALLBACK_PHRASES);
       setSelectedIndex(null);
       setConfidence(null);
     } catch {
-      setSentence(prev => [...prev, spokenWord]);
+      // Fallback: local selection
+      const phrase = phrases[index];
+      setSentence(prev => [...prev, phrase]);
       setSelectedIndex(null);
     }
     setIsLoading(false);
-
-    // Speak the individual word aloud
-    setIsSpeaking(true);
-    const audioResult = await speakText(spokenWord);
-    if (audioResult && audioResult !== 'browser') {
-      await new Promise<void>((resolve) => {
-        const audio = new Audio(audioResult);
-        audio.onended = () => resolve();
-        audio.onerror = () => resolve();
-        audio.play();
-      });
-    }
-    setIsSpeaking(false);
-
-    // Check if sentence is now complete/meaningful
-    const check = await runSentenceCheck();
-    if (check?.complete) {
-      // Sentence is complete — auto-speak the whole thing and reset
-      resetSilenceTimer();
-      setLastEvent('Sentence complete — speaking now');
-      await new Promise((r) => setTimeout(r, 300));
-      await autoEndSentence();
-    } else {
-      startSilenceTimer();
-      if (isSessionActive) setIsFlashing(true);
-    }
-  }, [isSessionActive, runSentenceCheck, startSilenceTimer, resetSilenceTimer, autoEndSentence]);
+  }, [phrases]);
 
   const handleDemoConfirm = useCallback(async () => {
     if (selectedIndex === null) return;
-    await handleWordConfirm(selectedIndex);
-  }, [selectedIndex, handleWordConfirm]);
-
-  const reloadWords = useCallback(async () => {
-    try {
-      const ph = await getPhrases();
-      setWords(ph.length > 0 ? ph : FALLBACK_WORDS);
-    } catch { /* keep current words */ }
-  }, []);
-
-  const handleUndo = useCallback(async () => {
-    try {
-      const result = await deleteLastPhrase();
-      setSentence(result.history);
-    } catch {
-      setSentence(prev => prev.slice(0, -1));
-    }
-    setSelectedIndex(null);
-    setConfidence(null);
-    await reloadWords();
-    await runSentenceCheck();
-    if (sentenceRef.current.length > 0) {
-      startSilenceTimer();
-    } else {
-      resetSilenceTimer();
-      setSentenceStatus(null);
-    }
-  }, [reloadWords, runSentenceCheck, startSilenceTimer, resetSilenceTimer]);
+    await handlePhraseClick(selectedIndex);
+    setTimeout(() => setIsFlashing(true), 500);
+  }, [selectedIndex, handlePhraseClick]);
 
   const toggleSession = () => {
     const next = !isSessionActive;
@@ -377,15 +208,14 @@ const P300Grid: React.FC = () => {
 
   const handleSpeak = async () => {
     if (sentence.length === 0) return;
-    resetSilenceTimer();
-    const text = sentence.join(' ');
+    const text = sentence.join(" ");
     setIsLoading(true);
     const wasFlashing = isFlashing;
     if (wasFlashing) setIsFlashing(false);
 
-    const audioResult = await speakText(text);
-    if (audioResult && audioResult !== 'browser') {
-      const audio = new Audio(audioResult);
+    const audioDataUrl = await speakText(text);
+    if (audioDataUrl) {
+      const audio = new Audio(audioDataUrl);
       audio.onended = () => { if (wasFlashing) setIsFlashing(true); };
       audio.play();
     } else {
@@ -394,17 +224,20 @@ const P300Grid: React.FC = () => {
     setIsLoading(false);
   };
 
-  const clearSentence = async () => {
+  const handleDelete = async () => {
+    try {
+      const result = await deleteLastPhrase();
+      setSentence(result.history);
+    } catch {
+      setSentence(prev => prev.slice(0, -1));
+    }
+  };
+
+  const clearSentence = () => {
     setSentence([]);
     setSelectedIndex(null);
-    setConfidence(null);
     setIsFlashing(false);
     setIsSessionActive(false);
-    setSentenceStatus(null);
-    resetSilenceTimer();
-    setWords(FALLBACK_WORDS);
-    try { await clearAllHistory(); } catch { /* ok */ }
-    await reloadWords();
   };
 
   const handleCalibrate = async () => {
@@ -446,11 +279,13 @@ const P300Grid: React.FC = () => {
           )}
         </div>
         <div className="flex items-center gap-2">
+          {/* Blink indicator */}
           <div className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold transition-all duration-200 ${blinkFlash ? 'bg-blue-400 text-white scale-110' : 'bg-blue-100 text-blue-500'}`}>
-            <Eye size={10} /> BLINK = SELECT
+            <Eye size={10} /> BLINK
           </div>
+          {/* Clench indicator */}
           <div className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold transition-all duration-200 ${clenchFlash ? 'bg-orange-400 text-white scale-110' : 'bg-orange-100 text-orange-500'}`}>
-            <Zap size={10} /> CLENCH = UNDO
+            <Zap size={10} /> CLENCH
           </div>
         </div>
       </div>
@@ -507,170 +342,13 @@ const P300Grid: React.FC = () => {
         </div>
       </div>
 
-      {/* Sentence Builder */}
-      <div className={`backdrop-blur-xl rounded-2xl p-4 shadow-lg min-h-[60px] border ring-1 w-full transition-all duration-500 ${
-        sentenceStatus?.complete
-          ? 'bg-emerald-500/20 border-emerald-400/60 ring-emerald-400/30'
-          : sentenceStatus?.meaningful
-            ? 'bg-amber-500/15 border-amber-400/50 ring-amber-400/20'
-            : 'bg-white/20 border-white/40 ring-white/20'
-      }`}>
-        <div className="flex items-center justify-between mb-2">
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] font-bold text-white/60 uppercase tracking-wider">Building sentence — word by word</span>
-            {sentenceStatus?.complete && (
-              <motion.span
-                initial={{ opacity: 0, scale: 0.5 }}
-                animate={{ opacity: 1, scale: 1 }}
-                className="flex items-center gap-1 text-[10px] font-bold text-emerald-300 bg-emerald-500/30 px-2 py-0.5 rounded-full"
-              >
-                <CheckCircle2 size={10} /> Complete
-              </motion.span>
-            )}
-            {sentenceStatus?.meaningful && !sentenceStatus?.complete && (
-              <motion.span
-                initial={{ opacity: 0, scale: 0.5 }}
-                animate={{ opacity: 1, scale: 1 }}
-                className="flex items-center gap-1 text-[10px] font-bold text-amber-300 bg-amber-500/30 px-2 py-0.5 rounded-full"
-              >
-                Almost there...
-              </motion.span>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            {silenceCountdown !== null && sentence.length > 0 && (
-              <motion.span
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className={`flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                  silenceCountdown <= 3 ? 'text-red-300 bg-red-500/30 animate-pulse' : 'text-white/60 bg-white/10'
-                }`}
-              >
-                <Timer size={10} /> {silenceCountdown}s
-              </motion.span>
-            )}
-            <span className="text-[10px] font-mono text-white/50">{sentence.length} words</span>
-          </div>
-        </div>
-        <div className="flex items-center flex-wrap gap-1.5 min-h-[36px]">
-          {sentence.length === 0 ? (
-            <span className="text-white/60 italic text-base font-medium pl-1">Focus on words to build your sentence...</span>
-          ) : (
-            <AnimatePresence>
-              {sentence.map((word, i) => (
-                <motion.span
-                  key={`${word}-${i}`}
-                  initial={{ opacity: 0, scale: 0.8, y: 8 }}
-                  animate={{ opacity: 1, scale: 1, y: 0 }}
-                  exit={{ opacity: 0, scale: 0.8 }}
-                  className="text-lg font-bold text-zinc-700 bg-white/90 px-2.5 py-0.5 rounded-lg shadow-sm"
-                >
-                  {word}
-                </motion.span>
-              ))}
-            </AnimatePresence>
-          )}
-          <span className="w-0.5 h-6 bg-white/50 animate-pulse ml-1" />
-        </div>
-        {isSpeaking && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            className="mt-2 flex items-center gap-2 text-sm font-bold text-white/80"
-          >
-            <Volume2 size={14} className="animate-pulse" /> Speaking...
-          </motion.div>
-        )}
-      </div>
+      {/* Live Gesture Test */}
+      <LiveTestPanel />
 
-      {/* Word Grid (6 words, 2x3) */}
-      <div className="relative p-1 rounded-3xl bg-gradient-to-br from-blue-400 via-purple-400 to-pink-400 shadow-xl">
-        <div className="absolute inset-0 bg-white/40 backdrop-blur-xl rounded-3xl m-[2px]" />
-        <div className="relative grid grid-cols-3 gap-3 p-3">
-          {words.map((word, index) => {
-            const isActive = flashIndex === index;
-            const isSelected = selectedIndex === index;
+      {/* Deep Learning Panel */}
+      <DeepLearningPanel />
 
-            return (
-              <motion.button
-                key={`${word}-${index}`}
-                onClick={() => handleWordConfirm(index)}
-                layout
-                className={`
-                  relative overflow-hidden rounded-xl text-xl font-black transition-all duration-75
-                  flex items-center justify-center p-3 h-20
-                  group shadow-sm border
-                  ${isActive
-                    ? 'bg-zinc-800 text-white scale-105 z-20 border-zinc-800 shadow-xl'
-                    : 'bg-white/80 text-zinc-700 border-white/60 hover:bg-white hover:scale-[1.02]'
-                  }
-                  ${isSelected
-                    ? 'ring-4 ring-emerald-500 bg-emerald-500 text-white z-30 scale-110 shadow-emerald-500/50 border-emerald-500'
-                    : ''
-                  }
-                `}
-              >
-                <span className="relative z-10 text-center leading-tight">{word}</span>
-
-                {isActive && (
-                  <motion.div
-                    layoutId="flash-overlay"
-                    className="absolute inset-0 bg-white/10"
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: 0.1 }}
-                  />
-                )}
-
-                {isSelected && confidence !== null && (
-                  <span className="absolute top-1.5 right-2 text-[10px] font-mono bg-white/30 px-1.5 py-0.5 rounded-full">
-                    {(confidence * 100).toFixed(0)}%
-                  </span>
-                )}
-
-                <span className={`absolute top-1.5 left-2 text-[10px] font-mono ${isActive ? 'opacity-50' : 'opacity-30'}`}>
-                  {index + 1}
-                </span>
-              </motion.button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Demo: confirm selected word / instructions */}
-      {isDemoMode && selectedIndex !== null && (
-        <motion.div
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="flex justify-center gap-3"
-        >
-          <button
-            onClick={handleDemoConfirm}
-            className="bg-emerald-500 hover:bg-emerald-600 text-white px-6 py-2 rounded-full font-bold shadow-lg shadow-emerald-500/30 transition-all active:scale-95 flex items-center gap-2"
-          >
-            <Eye size={16} />
-            Blink → Select "{words[selectedIndex]}"
-          </button>
-          <button
-            onClick={handleUndo}
-            disabled={sentence.length === 0}
-            className="bg-orange-500 hover:bg-orange-600 text-white px-6 py-2 rounded-full font-bold shadow-lg shadow-orange-500/30 transition-all active:scale-95 flex items-center gap-2 disabled:opacity-50"
-          >
-            <Zap size={16} />
-            Clench → Undo
-          </button>
-        </motion.div>
-      )}
-
-      {/* Last Event */}
-      {lastEvent && (
-        <div className="text-center text-xs font-medium text-white/80 bg-white/10 backdrop-blur-sm rounded-full px-4 py-1.5 mx-auto">
-          {lastEvent}
-        </div>
-      )}
-
-      {/* Controls */}
+      {/* Control Panel */}
       <div className="bg-white/40 backdrop-blur-md p-4 rounded-3xl border border-white/50 shadow-sm space-y-3">
         <div className="flex items-center justify-between px-2 pb-2">
           <span className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Controls</span>
@@ -698,22 +376,122 @@ const P300Grid: React.FC = () => {
 
         <div className="flex gap-2">
           <button
-            onClick={handleUndo}
+            onClick={handleDelete}
             disabled={sentence.length === 0}
             className="flex-1 bg-white hover:bg-zinc-50 text-zinc-700 py-3 rounded-xl font-bold shadow-sm border border-zinc-200/50 flex items-center justify-center gap-2 active:translate-y-0.5 transition-all disabled:opacity-50"
           >
-            <Undo2 size={18} />
-            <span>Undo Word</span>
+            <Trash2 size={18} />
+            <span>Undo Last</span>
           </button>
           <button
             onClick={clearSentence}
             className="flex-1 bg-white hover:bg-zinc-50 text-zinc-700 py-3 rounded-xl font-bold shadow-sm border border-zinc-200/50 flex items-center justify-center gap-2 active:translate-y-0.5 transition-all"
           >
-            <Eraser size={18} />
+            <RefreshCw size={18} />
             <span>Clear All</span>
           </button>
         </div>
       </div>
+
+      {/* Last Event */}
+      {lastEvent && (
+        <div className="text-center text-xs font-medium text-white/80 bg-white/10 backdrop-blur-sm rounded-full px-4 py-1.5 mx-auto">
+          {lastEvent}
+        </div>
+      )}
+
+      {/* Sentence Builder */}
+      <div className="bg-white/20 backdrop-blur-xl rounded-2xl p-4 shadow-lg min-h-[60px] flex items-center flex-wrap gap-2 border border-white/40 ring-1 ring-white/20 w-full">
+        {sentence.length === 0 ? (
+          <span className="text-white/60 italic text-base font-medium pl-1">Focus on phrases to build a sentence...</span>
+        ) : (
+          <AnimatePresence>
+            {sentence.map((word, i) => (
+              <motion.span
+                key={`${word}-${i}`}
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="text-lg font-bold text-zinc-700 bg-white/90 px-3 py-1 rounded-lg shadow-sm"
+              >
+                {word}
+              </motion.span>
+            ))}
+          </AnimatePresence>
+        )}
+        <span className="w-0.5 h-6 bg-white/50 animate-pulse ml-1"></span>
+      </div>
+
+      {/* P300 Phrase Grid (6 phrases, 2x3) */}
+      <div className="relative p-1 rounded-3xl bg-gradient-to-br from-blue-400 via-purple-400 to-pink-400 shadow-xl mb-4">
+        <div className="absolute inset-0 bg-white/40 backdrop-blur-xl rounded-3xl m-[2px]"></div>
+        <div className="relative grid grid-cols-2 md:grid-cols-3 gap-3 p-3 min-h-[220px]">
+          {phrases.map((phrase, index) => {
+            const isActive = flashIndex === index;
+            const isSelected = selectedIndex === index;
+
+            return (
+              <motion.button
+                key={`${phrase}-${index}`}
+                onClick={() => handlePhraseClick(index)}
+                layout
+                className={`
+                  relative overflow-hidden rounded-xl text-lg font-bold transition-all duration-75
+                  flex items-center justify-center p-3 h-24 md:h-28
+                  group shadow-sm border
+                  ${isActive
+                    ? 'bg-zinc-800 text-white scale-105 z-20 border-zinc-800 shadow-xl'
+                    : 'bg-white/80 text-zinc-600 border-white/60 hover:bg-white hover:scale-[1.02]'
+                  }
+                  ${isSelected
+                    ? 'ring-4 ring-emerald-500 bg-emerald-500 text-white z-30 scale-110 shadow-emerald-500/50 border-emerald-500'
+                    : ''
+                  }
+                `}
+              >
+                <span className="relative z-10 text-center leading-tight">{phrase}</span>
+
+                {isActive && (
+                  <motion.div
+                    layoutId="flash-overlay"
+                    className="absolute inset-0 bg-white/10"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.1 }}
+                  />
+                )}
+
+                {/* Confidence badge */}
+                {isSelected && confidence !== null && (
+                  <span className="absolute top-2 right-2 text-[10px] font-mono bg-white/30 px-1.5 py-0.5 rounded-full">
+                    {(confidence * 100).toFixed(0)}%
+                  </span>
+                )}
+
+                <span className={`absolute top-2 left-3 text-[10px] font-mono ${isActive ? 'opacity-50' : 'opacity-30'}`}>
+                  {index + 1}
+                </span>
+              </motion.button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Demo confirm hint */}
+      {isDemoMode && selectedIndex !== null && (
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="flex justify-center mb-4"
+        >
+          <button
+            onClick={handleDemoConfirm}
+            className="bg-emerald-500 hover:bg-emerald-600 text-white px-6 py-2 rounded-full font-bold shadow-lg shadow-emerald-500/30 transition-all active:scale-95"
+          >
+            Confirm Selection (Demo Blink)
+          </button>
+        </motion.div>
+      )}
     </div>
   );
 };

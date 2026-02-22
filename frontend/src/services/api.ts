@@ -75,23 +75,9 @@ export async function confirmPhrase(index: number): Promise<{
   return fetchJSON(`/phrases/confirm/${index}`, { method: "POST" });
 }
 
-export interface SentenceCheck {
-  complete: boolean;
-  meaningful: boolean;
-  suggestion: string;
-}
-
-export async function checkSentence(): Promise<SentenceCheck> {
-  return fetchJSON("/sentence/check");
-}
-
 export async function getHistory(): Promise<string[]> {
   const data = await fetchJSON<{ history: string[] }>("/history");
   return data.history;
-}
-
-export async function clearAllHistory(): Promise<void> {
-  await fetchJSON("/history", { method: "DELETE" });
 }
 
 export async function deleteLastPhrase(): Promise<{
