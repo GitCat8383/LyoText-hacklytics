@@ -35,6 +35,7 @@ class WebSocketManager:
         event_bus.on(EventType.CALIBRATION_PROGRESS, self._on_event)
         event_bus.on(EventType.SYSTEM_STATUS, self._on_event)
         event_bus.on(EventType.BAND_POWER, self._on_event)
+        event_bus.on(EventType.GESTURE_PREDICTION, self._on_event)
         event_bus.on(EventType.EEG_SAMPLE, self._on_eeg_sample)
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:

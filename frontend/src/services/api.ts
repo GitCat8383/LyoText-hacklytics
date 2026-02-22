@@ -31,6 +31,10 @@ export interface SystemStatus {
   calibration_epochs: number;
   redis_connected: boolean;
   simulate_mode: boolean;
+  eegnet_p300?: boolean;
+  eegnet_gesture?: boolean;
+  dl_training?: boolean;
+  collecting_data?: boolean;
 }
 
 export interface BCIEvent {
@@ -124,6 +128,135 @@ export async function updateConfig(
     method: "PATCH",
     body: JSON.stringify(updates),
   });
+}
+
+// ── Deep Learning API ────────────────────────────────────────
+
+export interface CollectionStatus {
+  active: boolean;
+  name?: string;
+  running?: boolean;
+  paused?: boolean;
+  current_gesture?: string;
+  current_trial?: number;
+  total_trials?: number;
+  collected?: number;
+  gesture_types?: string[];
+  trials_per_gesture?: number;
+}
+
+export interface DataSession {
+  name: string;
+  n_epochs: number;
+  file_size_kb?: number;
+  class_distribution?: Record<string, number>;
+}
+
+export interface TrainStatus {
+  training: boolean;
+  p300_loaded: boolean;
+  gesture_loaded: boolean;
+}
+
+export async function startCollection(
+  name: string,
+  gestureTypes?: string[],
+  trialsPerGesture?: number
+): Promise<any> {
+  return fetchJSON("/dl/collect/start", {
+    method: "POST",
+    body: JSON.stringify({
+      name,
+      gesture_types: gestureTypes,
+      trials_per_gesture: trialsPerGesture ?? 30,
+    }),
+  });
+}
+
+export async function stopCollection(): Promise<any> {
+  return fetchJSON("/dl/collect/stop", { method: "POST" });
+}
+
+export async function pauseCollection(): Promise<void> {
+  await fetchJSON("/dl/collect/pause", { method: "POST" });
+}
+
+export async function resumeCollection(): Promise<void> {
+  await fetchJSON("/dl/collect/resume", { method: "POST" });
+}
+
+export async function getCollectionStatus(): Promise<CollectionStatus> {
+  return fetchJSON("/dl/collect/status");
+}
+
+export async function addManualEpoch(label: string): Promise<any> {
+  return fetchJSON("/dl/collect/manual", {
+    method: "POST",
+    body: JSON.stringify({ label }),
+  });
+}
+
+export async function saveManualEpochs(
+  sessionName?: string
+): Promise<any> {
+  const params = sessionName ? `?session_name=${sessionName}` : "";
+  return fetchJSON(`/dl/collect/save${params}`, { method: "POST" });
+}
+
+export async function getDataSessions(): Promise<DataSession[]> {
+  const data = await fetchJSON<{ sessions: DataSession[] }>("/dl/sessions");
+  return data.sessions;
+}
+
+export async function startTraining(
+  modelType: "p300" | "gesture",
+  sessionName?: string,
+  maxEpochs?: number
+): Promise<any> {
+  return fetchJSON("/dl/train", {
+    method: "POST",
+    body: JSON.stringify({
+      model_type: modelType,
+      session_name: sessionName,
+      max_epochs: maxEpochs ?? 100,
+    }),
+  });
+}
+
+export async function getTrainStatus(): Promise<TrainStatus> {
+  return fetchJSON("/dl/train/status");
+}
+
+export async function getModels(): Promise<any[]> {
+  const data = await fetchJSON<{ models: any[] }>("/dl/models");
+  return data.models;
+}
+
+export async function reloadModels(): Promise<any> {
+  return fetchJSON("/dl/models/reload", { method: "POST" });
+}
+
+export async function predictGestureNow(): Promise<{
+  class_index: number;
+  class_name: string;
+  confidence: number;
+}> {
+  return fetchJSON("/dl/predict/gesture", { method: "POST" });
+}
+
+export async function startLiveTest(): Promise<any> {
+  return fetchJSON("/dl/live-test/start", { method: "POST" });
+}
+
+export async function stopLiveTest(): Promise<any> {
+  return fetchJSON("/dl/live-test/stop", { method: "POST" });
+}
+
+export async function getLiveTestStatus(): Promise<{
+  active: boolean;
+  model_loaded: boolean;
+}> {
+  return fetchJSON("/dl/live-test/status");
 }
 
 // ── WebSocket ────────────────────────────────────────────────

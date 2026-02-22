@@ -91,7 +91,10 @@ class SignalProcessor:
         ready = []
         remaining: list[tuple[float, int]] = []
 
-        for marker_ts, phrase_idx in self._markers:
+        snapshot = list(self._markers)
+        self._markers.clear()
+
+        for marker_ts, phrase_idx in snapshot:
             epoch_end = marker_ts + config.EPOCH_TMAX
             if now >= epoch_end + 0.05:
                 epoch = self._extract_epoch(marker_ts)
@@ -100,7 +103,6 @@ class SignalProcessor:
             else:
                 remaining.append((marker_ts, phrase_idx))
 
-        self._markers.clear()
         self._markers.extend(remaining)
 
         for epoch, phrase_idx in ready:
