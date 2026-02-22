@@ -97,6 +97,14 @@ export async function deleteLastPhrase(): Promise<{
   return fetchJSON("/history/last", { method: "DELETE" });
 }
 
+export async function startFlash(): Promise<void> {
+  await fetchJSON("/flash/start", { method: "POST" });
+}
+
+export async function stopFlash(): Promise<void> {
+  await fetchJSON("/flash/stop", { method: "POST" });
+}
+
 export async function startCalibration(): Promise<void> {
   await fetchJSON("/calibration/start", { method: "POST" });
 }

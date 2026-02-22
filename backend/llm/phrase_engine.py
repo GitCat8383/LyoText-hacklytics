@@ -171,14 +171,38 @@ class PhraseEngine:
 
     def _fallback_check(self, text: str) -> dict[str, Any]:
         words = text.split()
-        has_subject = any(w.lower() in ("i", "you", "he", "she", "we", "they", "it") for w in words)
-        has_verb = any(w.lower() in (
+        lower_words = [w.lower() for w in words]
+        last = lower_words[-1] if lower_words else ""
+
+        subjects = {"i", "you", "he", "she", "we", "they", "it", "that", "this"}
+        verbs = {
             "am", "is", "are", "was", "were", "need", "want", "have", "feel",
             "help", "call", "give", "come", "go", "like", "know", "think",
-            "can", "will", "do", "did", "see", "get", "make", "take",
-        ) for w in words)
-        meaningful = has_subject and has_verb
-        complete = meaningful and len(words) >= 3
+            "can", "will", "do", "did", "see", "get", "make", "take", "eat",
+            "drink", "sleep", "stop", "wait", "bring", "let", "tell", "say",
+        }
+        # Auxiliary/linking verbs and prepositions that signal an incomplete thought
+        incomplete_endings = {
+            "to", "the", "a", "an", "and", "or", "but", "with", "for", "in",
+            "on", "at", "of", "is", "am", "are", "was", "were", "can", "will",
+            "would", "could", "should", "shall", "may", "might", "must",
+            "do", "does", "did", "have", "has", "had", "been", "being",
+            "not", "very", "really", "just", "also", "want", "need",
+            "going", "about", "from", "into", "that", "which", "who",
+        }
+
+        has_subject = any(w in subjects for w in lower_words)
+        has_verb = any(w in verbs for w in lower_words)
+        ends_incomplete = last in incomplete_endings
+
+        # Imperative sentences (e.g. "help me", "please call") don't need a subject
+        imperative_starters = {"help", "please", "call", "give", "come", "go",
+                               "stop", "wait", "bring", "let", "tell", "get"}
+        is_imperative = lower_words[0] in imperative_starters if lower_words else False
+
+        meaningful = (has_subject and has_verb) or (is_imperative and len(words) >= 2)
+        complete = meaningful and len(words) >= 2 and not ends_incomplete
+
         return {"complete": complete, "meaningful": meaningful, "suggestion": ""}
 
     def confirm_phrase(self, phrase: str) -> None:

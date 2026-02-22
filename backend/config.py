@@ -20,10 +20,14 @@ EPOCH_TMAX = 0.8      # seconds after stimulus onset
 EPOCH_SAMPLES = int((EPOCH_TMAX - EPOCH_TMIN) * EEG_SAMPLE_RATE)  # ~230
 
 # ── P300 Stimulus ────────────────────────────────────────────
-FLASH_DURATION_MS = 150   # highlight duration per phrase
-ISI_MS = 100              # inter-stimulus interval
+FLASH_DURATION_MS = 150   # highlight duration per phrase (EEG oddball)
+ISI_MS = 100              # inter-stimulus interval (EEG oddball)
 NUM_FLASH_ROUNDS = 5      # rounds before classification decision
 NUM_PHRASES = 6           # phrases displayed at once
+
+# ── Flashcard Display (patient-facing) ───────────────────────
+FLASHCARD_DURATION_MS = 4000  # how long each word stays lit (ms)
+FLASHCARD_LOOPS = 2           # number of full loops through all words
 
 # ── Artifact Detection ───────────────────────────────────────
 BLINK_THRESHOLD_UV = 150      # peak amplitude on AF7/AF8

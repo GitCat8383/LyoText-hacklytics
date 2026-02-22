@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 import config
@@ -54,8 +54,20 @@ async def get_phrases() -> dict[str, Any]:
     return {"phrases": phrases}
 
 
+def _sync_flasher(request: Request, phrases: list[str] | None = None, sentence: list[str] | None = None) -> None:
+    """Push updated phrases and/or sentence to the Pygame flasher."""
+    try:
+        orch = request.app.state.orchestrator
+        if phrases is not None:
+            orch._flasher.set_phrases(phrases)
+        if sentence is not None:
+            orch._flasher.set_sentence(sentence)
+    except Exception:
+        pass
+
+
 @router.post("/phrases/confirm/{index}")
-async def confirm_phrase(index: int) -> dict[str, Any]:
+async def confirm_phrase(index: int, request: Request) -> dict[str, Any]:
     phrases = await phrase_engine.generate_phrases()
     if index < 0 or index >= len(phrases):
         raise HTTPException(status_code=400, detail="Invalid phrase index")
@@ -73,6 +85,7 @@ async def confirm_phrase(index: int) -> dict[str, Any]:
         data={"phrases": new_phrases},
     ))
 
+    _sync_flasher(request, phrases=new_phrases, sentence=phrase_engine.history)
     return {"confirmed": phrase, "history": phrase_engine.history, "new_phrases": new_phrases}
 
 
@@ -87,17 +100,19 @@ async def get_history() -> dict[str, Any]:
 
 
 @router.delete("/history")
-async def clear_history() -> dict[str, str]:
+async def clear_history(request: Request) -> dict[str, str]:
     phrase_engine.clear_history()
+    fallback = phrase_engine._fallback_phrases(config.NUM_PHRASES)
     event_bus.emit(Event(
         type=EventType.PHRASES_UPDATED,
-        data={"phrases": phrase_engine._fallback_phrases(config.NUM_PHRASES)},
+        data={"phrases": fallback},
     ))
+    _sync_flasher(request, phrases=fallback, sentence=[])
     return {"status": "cleared"}
 
 
 @router.delete("/history/last")
-async def delete_last() -> dict[str, Any]:
+async def delete_last(request: Request) -> dict[str, Any]:
     removed = phrase_engine.delete_last()
     if removed is None:
         raise HTTPException(status_code=404, detail="No history to delete")
@@ -106,6 +121,7 @@ async def delete_last() -> dict[str, Any]:
         type=EventType.PHRASE_DELETED,
         data={"removed": removed, "history": phrase_engine.history},
     ))
+    _sync_flasher(request, sentence=phrase_engine.history)
     return {"removed": removed, "history": phrase_engine.history}
 
 
@@ -126,6 +142,20 @@ async def stop_calibration() -> dict[str, Any]:
         return {"status": "calibration_complete", "accuracy": accuracy}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/flash/start")
+async def start_flash(request: Request) -> dict[str, str]:
+    orch = request.app.state.orchestrator
+    orch._flasher.start_flash()
+    return {"status": "flash_started"}
+
+
+@router.post("/flash/stop")
+async def stop_flash(request: Request) -> dict[str, str]:
+    orch = request.app.state.orchestrator
+    orch._flasher.stop_flash()
+    return {"status": "flash_stopped"}
 
 
 @router.get("/config")

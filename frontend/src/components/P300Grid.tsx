@@ -10,6 +10,8 @@ import {
   deleteLastPhrase,
   clearAllHistory,
   checkSentence,
+  startFlash,
+  stopFlash,
   startCalibration,
   stopCalibration,
   type BCIEvent,
@@ -29,7 +31,6 @@ import {
   Undo2,
   Eraser,
   CheckCircle2,
-  Timer,
 } from 'lucide-react';
 import EEGMonitor from './EEGMonitor';
 import BandPowerHistogram from './BandPowerHistogram';
@@ -53,7 +54,6 @@ const P300Grid: React.FC = () => {
   const [blinkFlash, setBlinkFlash] = useState(false);
   const [clenchFlash, setClenchFlash] = useState(false);
   const [sentenceStatus, setSentenceStatus] = useState<SentenceCheck | null>(null);
-  const [silenceCountdown, setSilenceCountdown] = useState<number | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
 
   const sentenceRef = useRef(sentence);
@@ -62,8 +62,6 @@ const P300Grid: React.FC = () => {
   useEffect(() => { selectedIndexRef.current = selectedIndex; }, [selectedIndex]);
   const wordsRef = useRef(words);
   useEffect(() => { wordsRef.current = words; }, [words]);
-  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ── Fetch initial state ────────────────────────────────────
 
@@ -167,95 +165,92 @@ const P300Grid: React.FC = () => {
     return () => unsubs.forEach((u) => u());
   }, []);
 
-  // ── Simulated flashing ─────────────────────────────────────
+  // ── Sequential flashcard: 4s per word, 2 loops ─────────────
 
-  useEffect(() => {
-    let interval: ReturnType<typeof setInterval>;
+  const FLASH_DURATION_MS = 4000;
+  const FLASH_LOOPS = 2;
+  const [flashLoop, setFlashLoop] = useState(0);
+  const [flashProgress, setFlashProgress] = useState(0);
+  const flashSeqRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    if (isFlashing) {
-      interval = setInterval(() => {
-        const idx = Math.floor(Math.random() * words.length);
-        setFlashIndex(idx);
-        setTimeout(() => setFlashIndex(null), 100);
-      }, 175);
-    } else {
-      setFlashIndex(null);
-    }
-    return () => clearInterval(interval);
-  }, [isFlashing, words.length]);
-
-  // Demo mode: auto-pick a word after a few seconds of flashing
-  useEffect(() => {
-    if (!isDemoMode || !isFlashing) return;
-    const timeout = setTimeout(() => {
-      const idx = Math.floor(Math.random() * words.length);
-      setSelectedIndex(idx);
-      setConfidence(0.7 + Math.random() * 0.25);
-      setIsFlashing(false);
-      setLastEvent(`P300 → "${words[idx]}" (demo)`);
-    }, 3000 + Math.random() * 2000);
-    return () => clearTimeout(timeout);
-  }, [isDemoMode, isFlashing, words]);
-
-  // ── Silence timer: auto-end sentence after 10s ──────────────
-
-  const SILENCE_TIMEOUT = 10;
-
-  const resetSilenceTimer = useCallback(() => {
-    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-    if (countdownRef.current) clearInterval(countdownRef.current);
-    setSilenceCountdown(null);
+  const stopFlashSequence = useCallback(() => {
+    if (flashSeqRef.current) clearTimeout(flashSeqRef.current);
+    flashSeqRef.current = null;
+    setFlashIndex(null);
+    setFlashLoop(0);
+    setFlashProgress(0);
   }, []);
 
-  const startSilenceTimer = useCallback(() => {
-    resetSilenceTimer();
+  const onLoopsFinishedRef = useRef<(() => void) | null>(null);
 
-    if (sentenceRef.current.length === 0) return;
+  const runFlashSequence = useCallback(() => {
+    stopFlashSequence();
+    if (words.length === 0) return;
 
-    setSilenceCountdown(SILENCE_TIMEOUT);
-    const startedAt = Date.now();
+    const totalSteps = words.length * FLASH_LOOPS;
+    let step = 0;
 
-    countdownRef.current = setInterval(() => {
-      const elapsed = Math.floor((Date.now() - startedAt) / 1000);
-      const remaining = SILENCE_TIMEOUT - elapsed;
-      if (remaining <= 0) {
-        setSilenceCountdown(0);
-      } else {
-        setSilenceCountdown(remaining);
+    const tick = () => {
+      if (step >= totalSteps) {
+        setFlashIndex(null);
+        setIsFlashing(false);
+        setFlashLoop(0);
+        setFlashProgress(0);
+        onLoopsFinishedRef.current?.();
+        return;
       }
-    }, 1000);
 
-    silenceTimerRef.current = setTimeout(() => {
-      if (countdownRef.current) clearInterval(countdownRef.current);
-      setSilenceCountdown(0);
-      autoEndSentence();
-    }, SILENCE_TIMEOUT * 1000);
-  }, [resetSilenceTimer]);
+      const wordIdx = step % wordsRef.current.length;
+      const loop = Math.floor(step / wordsRef.current.length) + 1;
+      setFlashIndex(wordIdx);
+      setFlashLoop(loop);
+      setFlashProgress(step + 1);
+      step++;
 
-  const autoEndSentence = useCallback(async () => {
-    resetSilenceTimer();
+      flashSeqRef.current = setTimeout(tick, FLASH_DURATION_MS);
+    };
+
+    tick();
+  }, [words.length, stopFlashSequence]);
+
+  useEffect(() => {
+    if (isFlashing) {
+      runFlashSequence();
+    } else {
+      stopFlashSequence();
+    }
+    return () => stopFlashSequence();
+  }, [isFlashing]);
+
+  // Restart flash sequence when words change during an active session
+  useEffect(() => {
+    if (isFlashing) {
+      runFlashSequence();
+    }
+  }, [words]);
+
+  // ── Speak full sentence, clear, and start fresh ─────────────
+
+  const speakAndReset = useCallback(async () => {
     const text = sentenceRef.current.join(' ');
     if (!text) return;
 
     setIsSpeaking(true);
     setIsFlashing(false);
-    setLastEvent(`Auto-speaking: "${text}"`);
+    try { await stopFlash(); } catch { /* best-effort */ }
+    setLastEvent(`Speaking: "${text}"`);
 
     const audioResult = await speakText(text);
     if (audioResult && audioResult !== 'browser') {
-      const audio = new Audio(audioResult);
-      audio.onended = () => {
-        setIsSpeaking(false);
-        finishAutoEnd();
-      };
-      audio.play();
-    } else {
-      setIsSpeaking(false);
-      finishAutoEnd();
+      await new Promise<void>((resolve) => {
+        const audio = new Audio(audioResult);
+        audio.onended = () => resolve();
+        audio.onerror = () => resolve();
+        audio.play();
+      });
     }
-  }, [resetSilenceTimer]);
+    setIsSpeaking(false);
 
-  const finishAutoEnd = useCallback(async () => {
     setSentence([]);
     setSelectedIndex(null);
     setConfidence(null);
@@ -267,11 +262,19 @@ const P300Grid: React.FC = () => {
       const ph = await getPhrases();
       setWords(ph.length > 0 ? ph : FALLBACK_WORDS);
     } catch { /* keep fallback */ }
+
+    setIsFlashing(true);
+    try { await startFlash(); } catch { /* best-effort */ }
   }, []);
 
+  // When 2 loops finish: speak the sentence (if any) and start fresh
   useEffect(() => {
-    return () => resetSilenceTimer();
-  }, [resetSilenceTimer]);
+    onLoopsFinishedRef.current = () => {
+      if (sentenceRef.current.length > 0) {
+        speakAndReset();
+      }
+    };
+  }, [speakAndReset]);
 
   // ── Check sentence completeness after changes ──────────────
 
@@ -323,16 +326,16 @@ const P300Grid: React.FC = () => {
     // Check if sentence is now complete/meaningful
     const check = await runSentenceCheck();
     if (check?.complete) {
-      // Sentence is complete — auto-speak the whole thing and reset
-      resetSilenceTimer();
       setLastEvent('Sentence complete — speaking now');
       await new Promise((r) => setTimeout(r, 300));
-      await autoEndSentence();
+      await speakAndReset();
     } else {
-      startSilenceTimer();
-      if (isSessionActive) setIsFlashing(true);
+      if (isSessionActive) {
+        setIsFlashing(true);
+        try { await startFlash(); } catch { /* best-effort */ }
+      }
     }
-  }, [isSessionActive, runSentenceCheck, startSilenceTimer, resetSilenceTimer, autoEndSentence]);
+  }, [isSessionActive, runSentenceCheck, speakAndReset]);
 
   const handleDemoConfirm = useCallback(async () => {
     if (selectedIndex === null) return;
@@ -357,25 +360,24 @@ const P300Grid: React.FC = () => {
     setConfidence(null);
     await reloadWords();
     await runSentenceCheck();
-    if (sentenceRef.current.length > 0) {
-      startSilenceTimer();
-    } else {
-      resetSilenceTimer();
+    if (sentenceRef.current.length === 0) {
       setSentenceStatus(null);
     }
-  }, [reloadWords, runSentenceCheck, startSilenceTimer, resetSilenceTimer]);
+  }, [reloadWords, runSentenceCheck]);
 
-  const toggleSession = () => {
+  const toggleSession = async () => {
     const next = !isSessionActive;
     setIsSessionActive(next);
     setIsFlashing(next);
     setSelectedIndex(null);
     setConfidence(null);
+    try {
+      if (next) { await startFlash(); } else { await stopFlash(); }
+    } catch { /* backend flash control is best-effort */ }
   };
 
   const handleSpeak = async () => {
     if (sentence.length === 0) return;
-    resetSilenceTimer();
     const text = sentence.join(' ');
     setIsLoading(true);
     const wasFlashing = isFlashing;
@@ -399,7 +401,6 @@ const P300Grid: React.FC = () => {
     setIsFlashing(false);
     setIsSessionActive(false);
     setSentenceStatus(null);
-    resetSilenceTimer();
     setWords(FALLBACK_WORDS);
     try { await clearAllHistory(); } catch { /* ok */ }
     await reloadWords();
@@ -530,17 +531,6 @@ const P300Grid: React.FC = () => {
             )}
           </div>
           <div className="flex items-center gap-2">
-            {silenceCountdown !== null && sentence.length > 0 && (
-              <motion.span
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className={`flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                  silenceCountdown <= 3 ? 'text-red-300 bg-red-500/30 animate-pulse' : 'text-white/60 bg-white/10'
-                }`}
-              >
-                <Timer size={10} /> {silenceCountdown}s
-              </motion.span>
-            )}
             <span className="text-[10px] font-mono text-white/50">{sentence.length} words</span>
           </div>
         </div>
@@ -575,9 +565,22 @@ const P300Grid: React.FC = () => {
         )}
       </div>
 
-      {/* Word Grid (6 words, 2x3) */}
+      {/* Word Grid (6 words, 3 cols) — flashcard style */}
       <div className="relative p-1 rounded-3xl bg-gradient-to-br from-blue-400 via-purple-400 to-pink-400 shadow-xl">
         <div className="absolute inset-0 bg-white/40 backdrop-blur-xl rounded-3xl m-[2px]" />
+
+        {/* Flash progress header */}
+        {isFlashing && (
+          <div className="relative flex items-center justify-between px-4 pt-2 pb-0">
+            <span className="text-[10px] font-bold text-zinc-500">
+              Loop {flashLoop}/{FLASH_LOOPS}
+            </span>
+            <span className="text-[10px] font-bold text-zinc-500">
+              {flashProgress}/{words.length * FLASH_LOOPS}
+            </span>
+          </div>
+        )}
+
         <div className="relative grid grid-cols-3 gap-3 p-3">
           {words.map((word, index) => {
             const isActive = flashIndex === index;
@@ -589,11 +592,11 @@ const P300Grid: React.FC = () => {
                 onClick={() => handleWordConfirm(index)}
                 layout
                 className={`
-                  relative overflow-hidden rounded-xl text-xl font-black transition-all duration-75
+                  relative overflow-hidden rounded-xl text-xl font-black
                   flex items-center justify-center p-3 h-20
-                  group shadow-sm border
+                  group shadow-sm border transition-colors duration-200
                   ${isActive
-                    ? 'bg-zinc-800 text-white scale-105 z-20 border-zinc-800 shadow-xl'
+                    ? 'bg-zinc-800 text-white scale-105 z-20 border-zinc-800 shadow-xl shadow-zinc-800/40'
                     : 'bg-white/80 text-zinc-700 border-white/60 hover:bg-white hover:scale-[1.02]'
                   }
                   ${isSelected
@@ -604,14 +607,14 @@ const P300Grid: React.FC = () => {
               >
                 <span className="relative z-10 text-center leading-tight">{word}</span>
 
+                {/* 4-second countdown bar on the active flashcard */}
                 {isActive && (
                   <motion.div
-                    layoutId="flash-overlay"
-                    className="absolute inset-0 bg-white/10"
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: 0.1 }}
+                    className="absolute bottom-0 left-0 h-1 bg-white/60 rounded-b-xl"
+                    initial={{ width: '100%' }}
+                    animate={{ width: '0%' }}
+                    transition={{ duration: FLASH_DURATION_MS / 1000, ease: 'linear' }}
+                    key={`bar-${flashProgress}`}
                   />
                 )}
 
