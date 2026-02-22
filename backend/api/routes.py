@@ -88,9 +88,24 @@ async def confirm_phrase(index: int) -> dict[str, Any]:
     return {"confirmed": phrase, "history": phrase_engine.history, "new_phrases": new_phrases}
 
 
+@router.get("/sentence/check")
+async def check_sentence() -> dict[str, Any]:
+    return await phrase_engine.check_sentence()
+
+
 @router.get("/history")
 async def get_history() -> dict[str, Any]:
     return {"history": phrase_engine.history}
+
+
+@router.delete("/history")
+async def clear_history() -> dict[str, str]:
+    phrase_engine.clear_history()
+    event_bus.emit(Event(
+        type=EventType.PHRASES_UPDATED,
+        data={"phrases": phrase_engine._fallback_phrases(config.NUM_PHRASES)},
+    ))
+    return {"status": "cleared"}
 
 
 @router.delete("/history/last")
