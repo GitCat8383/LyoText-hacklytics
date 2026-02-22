@@ -16,7 +16,9 @@ import queue
 import sys
 import threading
 import time
+from enum import Enum
 
+import numpy as np
 import uvicorn
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -29,7 +31,7 @@ from eeg.classifier import p300_classifier
 from eeg.deep_trainer import deep_trainer
 from eeg.processing import signal_processor
 from eeg.stream import eeg_stream
-from llm.phrase_engine import phrase_engine
+from llm.phrase_engine import OTHER_LABEL, phrase_engine
 from stimulus.flasher import StimulusFlasher
 from utils.events import Event, EventType, event_bus
 
@@ -38,6 +40,23 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
 logger = logging.getLogger("hacklytic")
+
+
+class SelectionState(str, Enum):
+    IDLE = "idle"
+    WARMUP = "warmup"
+    CALIBRATING = "calibrating"
+    HIGHLIGHTING = "highlighting"
+    CONFIRMING = "confirming"
+    EXECUTING = "executing"
+
+
+HIGHLIGHT_DURATION = 2.0
+WARMUP_DURATION = 2.0
+CALIBRATION_BLINKS = 2
+DEBOUNCE_PERIOD = 1.5
+CONFIRM_DISPLAY_SEC = 1.5
+DEFAULT_BLINK_THRESHOLD = 100.0
 
 
 class BCIOrchestrator:
@@ -54,6 +73,19 @@ class BCIOrchestrator:
         self._last_p300_selection: tuple[int, str] | None = None
         self._live_test_active = False
         self._gesture_vote_buffer: list[tuple[int, str, float]] = []
+
+        # Selection state machine
+        self._sel_state = SelectionState.IDLE
+        self._sel_warmup_start = 0.0
+        self._sel_last_progress_emit = 0.0
+        self._sel_cal_blinks = 0
+        self._sel_cal_amplitudes: list[float] = []
+        self._sel_blink_threshold = DEFAULT_BLINK_THRESHOLD
+        self._sel_highlight_index = 0
+        self._sel_highlight_start = 0.0
+        self._sel_last_blink_time = 0.0
+        self._sel_confirmed_index = -1
+        self._sel_confirm_start = 0.0
 
     def start(self) -> None:
         self._running = True
@@ -101,19 +133,28 @@ class BCIOrchestrator:
 
     async def _load_initial_phrases(self) -> None:
         try:
-            self._current_phrases = await phrase_engine.generate_phrases()
+            words = await phrase_engine.generate_words()
+            self._current_phrases = words + [OTHER_LABEL]
             self._flasher.set_phrases(self._current_phrases)
             event_bus.emit(Event(
                 type=EventType.PHRASES_UPDATED,
                 data={"phrases": self._current_phrases},
             ))
-            logger.info("Initial phrases loaded: %s", self._current_phrases)
+            event_bus.emit(Event(
+                type=EventType.WORDS_UPDATED,
+                data={
+                    "words": words,
+                    "phrases": self._current_phrases,
+                    "sentence": [],
+                },
+            ))
+            logger.info("Initial words loaded: %s", self._current_phrases)
 
             if p300_classifier.is_trained:
                 time.sleep(1.0)
                 self._start_flash_cycle()
         except Exception:
-            logger.exception("Failed to load initial phrases")
+            logger.exception("Failed to load initial words")
 
     def stop(self) -> None:
         self._running = False
@@ -146,11 +187,16 @@ class BCIOrchestrator:
 
     def _processing_loop(self) -> None:
         last_gesture_check = 0.0
+        last_selection_tick = 0.0
 
         while self._running:
             try:
-                samples, timestamps = self._sample_queue.get(timeout=0.1)
+                samples, timestamps = self._sample_queue.get(timeout=0.05)
             except queue.Empty:
+                now = time.time()
+                if self._sel_state != SelectionState.IDLE and now - last_selection_tick >= 0.1:
+                    last_selection_tick = now
+                    self._run_selection_tick()
                 continue
 
             filtered = signal_processor.process_chunk(samples, timestamps)
@@ -162,10 +208,15 @@ class BCIOrchestrator:
                     self._cycle_epochs.append((epoch, phrase_idx))
 
             now = time.time()
-            interval = 0.25
 
+            if self._sel_state != SelectionState.IDLE and now - last_selection_tick >= 0.1:
+                last_selection_tick = now
+                self._run_selection_tick()
+
+            interval = 0.25
             if (
                 deep_trainer.gesture_model is not None
+                and self._sel_state == SelectionState.IDLE
                 and (self._live_test_active or not self._flash_active)
                 and now - last_gesture_check >= interval
             ):
@@ -309,12 +360,12 @@ class BCIOrchestrator:
         def _do():
             loop = asyncio.new_event_loop()
             try:
-                phrases = loop.run_until_complete(phrase_engine.generate_phrases())
-                self._current_phrases = phrases
-                self._flasher.set_phrases(phrases)
+                words = loop.run_until_complete(phrase_engine.generate_words())
+                self._current_phrases = words + [OTHER_LABEL]
+                self._flasher.set_phrases(self._current_phrases)
                 event_bus.emit(Event(
                     type=EventType.PHRASES_UPDATED,
-                    data={"phrases": phrases},
+                    data={"phrases": self._current_phrases},
                 ))
                 time.sleep(0.5)
                 self._start_flash_cycle()
@@ -412,6 +463,294 @@ class BCIOrchestrator:
                 ))
         except Exception:
             logger.debug("Gesture classification failed", exc_info=True)
+
+    # ── Selection state machine ────────────────────────────────
+
+    def start_selection(self) -> dict:
+        """Begin warmup → calibration → highlighting cycle."""
+        if self._sel_state != SelectionState.IDLE:
+            return {"error": "Selection already active"}
+        if not self._current_phrases:
+            return {"error": "No phrases loaded"}
+
+        self._sel_state = SelectionState.WARMUP
+        self._sel_warmup_start = time.time()
+        self._sel_last_progress_emit = 0.0
+        self._sel_cal_blinks = 0
+        self._sel_cal_amplitudes.clear()
+        self._sel_last_blink_time = 0.0
+        self._sel_blink_threshold = DEFAULT_BLINK_THRESHOLD
+        self._gesture_vote_buffer.clear()
+
+        logger.info("Selection started — entering warmup phase")
+        event_bus.emit(Event(
+            type=EventType.WARMUP_STATUS,
+            data={"state": "warmup", "message": "Stabilizing signal...", "progress": 0.0},
+        ))
+        return {"status": "started", "state": "warmup"}
+
+    def stop_selection(self) -> dict:
+        """Full session stop: halt everything, reset state."""
+        prev = self._sel_state
+        self._sel_state = SelectionState.IDLE
+        self._sel_highlight_index = 0
+        logger.info("Session stopped (was %s)", prev.value)
+        event_bus.emit(Event(
+            type=EventType.SESSION_STOPPED,
+            data={"previous_state": prev.value, "message": "Session stopped"},
+        ))
+        event_bus.emit(Event(
+            type=EventType.WARMUP_STATUS,
+            data={"state": "idle", "message": "Session stopped", "progress": 0.0},
+        ))
+        return {"status": "stopped"}
+
+    @property
+    def selection_status(self) -> dict:
+        return {
+            "state": self._sel_state.value,
+            "highlight_index": self._sel_highlight_index,
+            "blink_threshold": self._sel_blink_threshold,
+            "calibration_blinks": self._sel_cal_blinks,
+            "phrases": self._current_phrases,
+        }
+
+    def _detect_raw_blink(self) -> tuple[bool, float]:
+        """Detect blink from raw frontal EEG peak-to-peak amplitude (last 500ms)."""
+        try:
+            raw_samples = redis_store.get_recent_raw(seconds=0.5)
+            if len(raw_samples) < 64:
+                return False, 0.0
+            data = np.array(
+                [[s["af7"], s["af8"]] for s in raw_samples], dtype=np.float32,
+            )
+            pp_af7 = float(data[:, 0].max() - data[:, 0].min())
+            pp_af8 = float(data[:, 1].max() - data[:, 1].min())
+            max_pp = max(pp_af7, pp_af8)
+            return max_pp > self._sel_blink_threshold, max_pp
+        except Exception:
+            return False, 0.0
+
+    def _run_selection_tick(self) -> None:
+        """Advance the selection state machine (called ~every 100ms)."""
+        now = time.time()
+
+        if self._sel_state == SelectionState.WARMUP:
+            elapsed = now - self._sel_warmup_start
+            progress = min(elapsed / WARMUP_DURATION, 1.0)
+
+            if now - self._sel_last_progress_emit >= 0.3:
+                self._sel_last_progress_emit = now
+                event_bus.emit(Event(
+                    type=EventType.WARMUP_STATUS,
+                    data={
+                        "state": "warmup",
+                        "message": "Stabilizing signal...",
+                        "progress": round(progress, 2),
+                    },
+                ))
+
+            if elapsed >= WARMUP_DURATION:
+                self._sel_state = SelectionState.CALIBRATING
+                self._sel_cal_blinks = 0
+                self._sel_cal_amplitudes.clear()
+                self._sel_last_blink_time = 0.0
+                logger.info("Warmup complete — entering calibration (blink %d times)", CALIBRATION_BLINKS)
+                event_bus.emit(Event(
+                    type=EventType.CALIBRATION_STATUS,
+                    data={
+                        "state": "calibrating",
+                        "blinks_detected": 0,
+                        "blinks_needed": CALIBRATION_BLINKS,
+                        "threshold": self._sel_blink_threshold,
+                    },
+                ))
+
+        elif self._sel_state == SelectionState.CALIBRATING:
+            is_blink, amplitude = self._detect_raw_blink()
+            if is_blink and now - self._sel_last_blink_time > DEBOUNCE_PERIOD:
+                self._sel_last_blink_time = now
+                self._sel_cal_blinks += 1
+                self._sel_cal_amplitudes.append(amplitude)
+                logger.info(
+                    "Calibration blink %d/%d (amplitude=%.1f uV)",
+                    self._sel_cal_blinks, CALIBRATION_BLINKS, amplitude,
+                )
+                event_bus.emit(Event(
+                    type=EventType.CALIBRATION_STATUS,
+                    data={
+                        "state": "calibrating",
+                        "blinks_detected": self._sel_cal_blinks,
+                        "blinks_needed": CALIBRATION_BLINKS,
+                        "threshold": round(amplitude, 1),
+                    },
+                ))
+
+                if self._sel_cal_blinks >= CALIBRATION_BLINKS:
+                    self._sel_blink_threshold = min(self._sel_cal_amplitudes) * 0.7
+                    logger.info(
+                        "Calibration complete — threshold set to %.1f uV",
+                        self._sel_blink_threshold,
+                    )
+                    event_bus.emit(Event(
+                        type=EventType.CALIBRATION_STATUS,
+                        data={
+                            "state": "complete",
+                            "blinks_detected": CALIBRATION_BLINKS,
+                            "blinks_needed": CALIBRATION_BLINKS,
+                            "threshold": round(self._sel_blink_threshold, 1),
+                        },
+                    ))
+                    self._sel_state = SelectionState.HIGHLIGHTING
+                    self._sel_highlight_index = 0
+                    self._sel_highlight_start = now
+                    self._sel_last_blink_time = now
+                    phrase = self._current_phrases[0] if self._current_phrases else ""
+                    event_bus.emit(Event(
+                        type=EventType.HIGHLIGHT_CHANGED,
+                        data={
+                            "index": 0,
+                            "phrase": phrase,
+                            "total": len(self._current_phrases),
+                        },
+                    ))
+
+        elif self._sel_state == SelectionState.HIGHLIGHTING:
+            is_blink, amplitude = self._detect_raw_blink()
+            if is_blink and now - self._sel_last_blink_time > DEBOUNCE_PERIOD:
+                self._sel_last_blink_time = now
+                self._sel_confirmed_index = self._sel_highlight_index
+                self._sel_confirm_start = now
+                self._sel_state = SelectionState.CONFIRMING
+                phrase = (
+                    self._current_phrases[self._sel_confirmed_index]
+                    if self._sel_confirmed_index < len(self._current_phrases)
+                    else "?"
+                )
+                logger.info(
+                    "Selection confirmed: [%d] '%s' (amplitude=%.1f uV)",
+                    self._sel_confirmed_index, phrase, amplitude,
+                )
+                event_bus.emit(Event(
+                    type=EventType.SELECTION_CONFIRMED,
+                    data={
+                        "index": self._sel_confirmed_index,
+                        "phrase": phrase,
+                        "confidence": round(amplitude / self._sel_blink_threshold, 2),
+                    },
+                ))
+            elif now - self._sel_highlight_start >= HIGHLIGHT_DURATION:
+                n = len(self._current_phrases) or 1
+                self._sel_highlight_index = (self._sel_highlight_index + 1) % n
+                self._sel_highlight_start = now
+                phrase = (
+                    self._current_phrases[self._sel_highlight_index]
+                    if self._sel_highlight_index < len(self._current_phrases)
+                    else ""
+                )
+                event_bus.emit(Event(
+                    type=EventType.HIGHLIGHT_CHANGED,
+                    data={
+                        "index": self._sel_highlight_index,
+                        "phrase": phrase,
+                        "total": len(self._current_phrases),
+                    },
+                ))
+
+        elif self._sel_state == SelectionState.CONFIRMING:
+            if now - self._sel_confirm_start >= CONFIRM_DISPLAY_SEC:
+                idx = self._sel_confirmed_index
+                is_other = idx == 5
+
+                if is_other:
+                    logger.info("'Other' selected — generating new words")
+                    self._sel_state = SelectionState.EXECUTING
+                    self._refresh_words_and_resume(is_other=True)
+                else:
+                    word = (
+                        self._current_phrases[idx]
+                        if idx < len(self._current_phrases)
+                        else "?"
+                    )
+                    phrase_engine.select_word(word)
+                    logger.info("Word selected: '%s'", word)
+                    event_bus.emit(Event(
+                        type=EventType.WORD_SELECTED,
+                        data={
+                            "word": word,
+                            "sentence": phrase_engine.sentence,
+                        },
+                    ))
+                    self._sel_state = SelectionState.EXECUTING
+                    self._refresh_words_and_resume(is_other=False)
+
+    def _refresh_words_and_resume(self, is_other: bool = False) -> None:
+        """Generate new words in background and resume highlighting."""
+        def _do():
+            loop = asyncio.new_event_loop()
+            try:
+                if is_other:
+                    words = loop.run_until_complete(phrase_engine.generate_other_words())
+                else:
+                    words = loop.run_until_complete(phrase_engine.generate_words())
+                self._current_phrases = words + [OTHER_LABEL]
+                self._flasher.set_phrases(self._current_phrases)
+                event_bus.emit(Event(
+                    type=EventType.WORDS_UPDATED,
+                    data={
+                        "words": words,
+                        "phrases": self._current_phrases,
+                        "sentence": phrase_engine.sentence,
+                    },
+                ))
+                self._sel_highlight_index = 0
+                self._sel_highlight_start = time.time()
+                self._sel_last_blink_time = time.time()
+                self._sel_state = SelectionState.HIGHLIGHTING
+                event_bus.emit(Event(
+                    type=EventType.HIGHLIGHT_CHANGED,
+                    data={
+                        "index": 0,
+                        "phrase": self._current_phrases[0] if self._current_phrases else "",
+                        "total": len(self._current_phrases),
+                    },
+                ))
+            except Exception:
+                logger.exception("Failed to refresh words")
+                self._sel_state = SelectionState.HIGHLIGHTING
+                self._sel_highlight_start = time.time()
+            finally:
+                loop.close()
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _refresh_phrases_async(self) -> None:
+        """Compatibility wrapper."""
+        self._refresh_words_and_resume(is_other=False)
+
+    def done_send(self) -> dict:
+        """Done/Send: return sentence, clear it, generate fresh words, keep looping."""
+        sentence_text = phrase_engine.sentence_text
+        sentence_list = phrase_engine.sentence
+        if not sentence_list:
+            return {"error": "No sentence to send"}
+
+        phrase_engine.done_send()
+        logger.info("Done/Send: '%s'", sentence_text)
+
+        event_bus.emit(Event(
+            type=EventType.SELECTION_EXECUTED,
+            data={"phrase": sentence_text, "sentence": sentence_list, "action": "done_send"},
+        ))
+        event_bus.emit(Event(
+            type=EventType.SENTENCE_CLEARED,
+            data={"spoken": sentence_text},
+        ))
+
+        if self._sel_state in (SelectionState.HIGHLIGHTING, SelectionState.EXECUTING):
+            self._sel_state = SelectionState.EXECUTING
+            self._refresh_words_and_resume(is_other=False)
+
+        return {"status": "sent", "sentence": sentence_text}
 
     def _schedule_next_cycle(self, delay: float = 0.5) -> None:
         def _delayed():

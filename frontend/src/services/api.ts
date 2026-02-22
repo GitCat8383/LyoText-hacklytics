@@ -237,6 +237,40 @@ export async function getLiveTestStatus(): Promise<{
   return fetchJSON("/dl/live-test/status");
 }
 
+// ── Blink-to-Select API ─────────────────────────────────────
+
+export interface SelectionStatus {
+  state: string;
+  highlight_index: number;
+  blink_threshold: number;
+  calibration_blinks: number;
+  phrases: string[];
+}
+
+export async function startSelection(): Promise<any> {
+  return fetchJSON("/selection/start", { method: "POST" });
+}
+
+export async function stopSelection(): Promise<any> {
+  return fetchJSON("/selection/stop", { method: "POST" });
+}
+
+export async function getSelectionStatus(): Promise<SelectionStatus> {
+  return fetchJSON("/selection/status");
+}
+
+export async function doneSend(): Promise<{ status: string; sentence: string }> {
+  return fetchJSON("/selection/done", { method: "POST" });
+}
+
+export async function getSentence(): Promise<{ sentence: string[]; text: string }> {
+  return fetchJSON("/sentence");
+}
+
+export async function clearSentence(): Promise<{ status: string }> {
+  return fetchJSON("/sentence/clear", { method: "POST" });
+}
+
 // ── WebSocket ────────────────────────────────────────────────
 
 type EventCallback = (event: BCIEvent) => void;

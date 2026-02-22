@@ -36,6 +36,15 @@ class WebSocketManager:
         event_bus.on(EventType.SYSTEM_STATUS, self._on_event)
         event_bus.on(EventType.BAND_POWER, self._on_event)
         event_bus.on(EventType.GESTURE_PREDICTION, self._on_event)
+        event_bus.on(EventType.HIGHLIGHT_CHANGED, self._on_event)
+        event_bus.on(EventType.SELECTION_CONFIRMED, self._on_event)
+        event_bus.on(EventType.WARMUP_STATUS, self._on_event)
+        event_bus.on(EventType.CALIBRATION_STATUS, self._on_event)
+        event_bus.on(EventType.SELECTION_EXECUTED, self._on_event)
+        event_bus.on(EventType.WORDS_UPDATED, self._on_event)
+        event_bus.on(EventType.WORD_SELECTED, self._on_event)
+        event_bus.on(EventType.SENTENCE_CLEARED, self._on_event)
+        event_bus.on(EventType.SESSION_STOPPED, self._on_event)
         event_bus.on(EventType.EEG_SAMPLE, self._on_eeg_sample)
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:

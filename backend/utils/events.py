@@ -25,6 +25,15 @@ class EventType(str, Enum):
     SYSTEM_STATUS = "system_status"
     FLASH_COMMAND = "flash_command"
     GESTURE_PREDICTION = "gesture_prediction"
+    HIGHLIGHT_CHANGED = "highlight_changed"
+    SELECTION_CONFIRMED = "selection_confirmed"
+    WARMUP_STATUS = "warmup_status"
+    CALIBRATION_STATUS = "calibration_status"
+    SELECTION_EXECUTED = "selection_executed"
+    WORDS_UPDATED = "words_updated"
+    WORD_SELECTED = "word_selected"
+    SENTENCE_CLEARED = "sentence_cleared"
+    SESSION_STOPPED = "session_stopped"
 
 
 @dataclass
